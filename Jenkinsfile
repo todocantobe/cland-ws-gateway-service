@@ -15,7 +15,7 @@ pipeline {
         string(name: 'APP_NAME', defaultValue: 'cland-ws-gateway-service', description: '应用服务名称')
         string(name: 'APP_PORT', defaultValue: '8080', description: 'HTTP 应用内部监听端口 (Container Port)')
         string(name: 'WS_PORT', defaultValue: '8081', description: 'WebSocket 端口 (双端口服务, 额外映射)')
-        string(name: 'HEALTH_PATH', defaultValue: '/api/health', description: '部署后健康检查路径 (HTTP GET)')
+        string(name: 'HEALTH_PATH', defaultValue: '/health', description: '部署后健康检查路径 (HTTP GET)')
 
         // --- 仓库地址配置 ---
         string(name: 'DOCKER_REGISTRY', defaultValue: '192.168.1.7:5000', description: 'Docker 私有仓库上传地址')

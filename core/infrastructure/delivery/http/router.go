@@ -45,13 +45,14 @@ func setupRoutes(r *gin.Engine, chatUseCase *usecase.ChatUseCase) {
 		c.Next()
 	})
 
+	// 健康检查（标准路径 /health；部署流水线门禁以此为准）
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
 	// API路由分组
 	api := r.Group("/api")
 	{
-		api.GET("/health", func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{"status": "ok"})
-		})
-
 		// User initialization
 		userUC := usecase.NewUserUseCase(
 			chatUseCase.UserRepo,
