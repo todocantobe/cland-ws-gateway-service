@@ -10,7 +10,7 @@ app_name: cland-ws-gateway-service
 app_port: 8080
 expose_app_port: 8080
 ws_port: 8081
-health_path: /api/health
+health_path: /health
 go_version: "1.24"
 docker_registry: 192.168.1.7:5000
 docker_registry_cache: 192.168.1.7:5001
