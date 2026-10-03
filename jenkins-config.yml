@@ -1,0 +1,15 @@
+type: go-ws
+output: /home/alice/work/go/cland-ws-gateway-service/Jenkinsfile
+env: dev
+dev_server_ip: 192.168.1.5     # dev 部署节点（.5）
+app_name: cland-ws-gateway-service
+app_port: 8080                  # HTTP（/api/health）
+expose_app_port: 8080
+ws_port: 8081                   # WS 帧网关（/ws，代码内硬编码 8081）
+health_path: /api/health
+docker_registry: 192.168.1.7:5000
+docker_registry_cache: 192.168.1.7:5001
+docker_credentials_id: docker-registry-auth
+git_credential_id: chaineasy
+deploy_ssh_cred_id: deploy-server-ssh-key
+go_version: "1.24"
