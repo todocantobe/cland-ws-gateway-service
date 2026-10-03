@@ -72,7 +72,7 @@ pipeline {
                         sh 'go test ./...'
 
                         echo '--- 2. 构建二进制 (CGO) ---'
-                        sh 'mkdir -p build && go build -o build/cland-ws-gateway .'
+                        sh 'mkdir -p build && go build -buildvcs=false -o build/cland-ws-gateway .'
                     }
                 }
             }
