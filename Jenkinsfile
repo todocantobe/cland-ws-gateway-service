@@ -1,11 +1,11 @@
 pipeline {
     agent any
 
-    // --- 参数化构建配置 ---
+    // --- 参数化构建配置 (占位值由 generate-jenkinsfile.py 替换) ---
     parameters {
         choice(name: 'DEPLOY_ENV', choices: ['dev', 'prod', 'test'], description: '选择要部署的目标环境')
 
-        // --- 服务器配置 ---
+        // --- 服务器配置 (生产建议在 Jenkins Job 参数默认值中维护) ---
         string(name: 'DEV_SERVER_IP', defaultValue: '192.168.1.5', description: 'Dev 环境服务器 IP')
         string(name: 'PROD_SERVER_IP', defaultValue: '192.168.1.102', description: 'Prod 环境服务器 IP')
         string(name: 'SSH_USER', defaultValue: 'root', description: '部署服务器 SSH 用户名')
@@ -14,7 +14,7 @@ pipeline {
         string(name: 'EXPOSE_APP_PORT', defaultValue: '8080', description: 'HTTP 应用暴露端口 (Host Port)')
         string(name: 'APP_NAME', defaultValue: 'cland-ws-gateway-service', description: '应用服务名称')
         string(name: 'APP_PORT', defaultValue: '8080', description: 'HTTP 应用内部监听端口 (Container Port)')
-        string(name: 'WS_PORT', defaultValue: '8081', description: 'WebSocket 帧网关端口 (双端口服务, 额外映射)')
+        string(name: 'WS_PORT', defaultValue: '8081', description: 'WebSocket 端口 (双端口服务, 额外映射)')
         string(name: 'HEALTH_PATH', defaultValue: '/api/health', description: '部署后健康检查路径 (HTTP GET)')
 
         // --- 仓库地址配置 ---
@@ -23,6 +23,14 @@ pipeline {
 
         // --- 版本控制 ---
         string(name: 'GO_VERSION', defaultValue: '1.24', description: 'Go 编译环境版本')
+
+        // --- Nacos 配置参数 (服务未接入 Nacos 时可忽略) ---
+        string(name: 'NACOS_SERVERADDR', defaultValue: '192.168.1.11:8848', description: 'Nacos 服务器地址 (格式: host:port)')
+        string(name: 'NACOS_NAMESPACE', defaultValue: 'ec1145fa-c136-470b-b94b-4fa365312a3d', description: 'Nacos 命名空间 (public 留空)')
+        string(name: 'NACOS_DATAID', defaultValue: 'cland-ws-gateway-service', description: 'Nacos 配置 Data ID')
+        string(name: 'NACOS_GROUP', defaultValue: 'DEFAULT_GROUP', description: 'Nacos 配置 Group')
+        string(name: 'NACOS_USERNAME', defaultValue: 'base', description: 'Nacos 用户名')
+        string(name: 'NACOS_PASSWORD', defaultValue: 'base123', description: 'Nacos 密码')
 
         // --- 凭证 ID 配置 ---
         string(name: 'GIT_CREDENTIAL_ID', defaultValue: 'chaineasy', description: 'Git 仓库访问凭证 ID')
@@ -57,8 +65,8 @@ pipeline {
         stage('Go Quality & Build') {
             agent {
                 docker {
-                    // Go 官方镜像（含 gcc，满足 CGO/mattn-go-sqlite3）；走 5001 缓存仓
-                    // 镜像自带 registry 主机(5001 缓存仓, 匿名可拉)，不再设 registryUrl，避免二次前缀
+                    // Go 官方镜像（含 gcc，满足 CGO）；镜像自带 registry 主机(5001 缓存仓, 匿名可拉)，
+                    // 不再设 registryUrl，避免二次前缀
                     image "${env.DOCKER_REGISTRY_CACHE}/library/golang:${env.GO_VERSION}-bookworm"
                     args ' -u 0:0 --entrypoint="" -e CGO_ENABLED=1 -e GOPROXY=https://goproxy.cn,direct -e GOSUMDB=off -e GOTOOLCHAIN=local -v /var/lib/jenkins/go_cache/mod:/go/pkg/mod -v /var/lib/jenkins/go_cache/build:/root/.cache/go-build'
                     reuseNode true
@@ -71,8 +79,9 @@ pipeline {
                         sh 'go vet ./...'
                         sh 'go test ./...'
 
-                        echo '--- 2. 构建二进制 (CGO) ---'
-                        sh 'mkdir -p build && go build -buildvcs=false -o build/cland-ws-gateway .'
+                        echo '--- 2. 构建二进制 (CGO, 产物 build/app) ---'
+                        // -buildvcs=false: 容器内 git ownership 导致 VCS stamping exit 128
+                        sh 'mkdir -p build && go build -buildvcs=false -o build/app .'
                     }
                 }
             }
@@ -132,12 +141,12 @@ pipeline {
 
                     def remoteScript = """
                         set -e
-                        mkdir -p ${logDir} ${dataDir}
-                        chmod -R 777 ${logDir} ${dataDir}
+                        sudo mkdir -p ${logDir} ${dataDir}
+                        sudo chmod -R 777 ${logDir} ${dataDir}
 
                         docker pull ${latestImageName}
 
-                        # 幂等替换旧容器：直接 rm -f
+                        # 幂等替换旧容器：直接 rm -f（stop+rm 在 restarting 异常态会失败）
                         docker rm -f ${APP_NAME} >/dev/null 2>&1 || true
 
                         docker run -d \\
@@ -148,6 +157,12 @@ pipeline {
                             -v ${logDir}:/app/logs \\
                             -v ${dataDir}:/app/data \\
                             -e CLAND_SERVER_PORT=${APP_PORT} \\
+                            -e NACOS_SERVERADDR="${params.NACOS_SERVERADDR}" \\
+                            -e NACOS_NAMESPACE="${params.NACOS_NAMESPACE}" \\
+                            -e NACOS_DATAID="${params.NACOS_DATAID}" \\
+                            -e NACOS_GROUP="${params.NACOS_GROUP}" \\
+                            -e NACOS_USERNAME="${params.NACOS_USERNAME}" \\
+                            -e NACOS_PASSWORD="${params.NACOS_PASSWORD}" \\
                             ${latestImageName}
 
                         docker ps -f name=${APP_NAME}
@@ -179,7 +194,7 @@ pipeline {
                         sleep 3
                     }
                     if (!healthy) {
-                        error "❌ 部署后健康检查失败: ${healthUrl}"
+                        error "❌ 部署后健康检查失败: ${healthUrl}（容器未起 / 端口不通 / 镜像拉取失败）"
                     }
                     echo "✅ Deployment successful!（健康检查通过: ${healthUrl}）"
                 }

@@ -1,15 +1,25 @@
+# 由 .agents/skills/jenkins 的 go-ws 模板生成（templates/jenkins-config-go-ws.yml 为示例）
+# 复现：python3 ~/.agents/skills/jenkins/scripts/generate-jenkinsfile.py -y jenkins-config.yml -o Jenkinsfile
 type: go-ws
-output: /home/alice/work/go/cland-ws-gateway-service/Jenkinsfile
+output: Jenkinsfile
 env: dev
-dev_server_ip: 192.168.1.5     # dev 部署节点（.5）
+dev_server_ip: 192.168.1.5
+prod_server_ip: 192.168.1.102
+ssh_user: root
 app_name: cland-ws-gateway-service
-app_port: 8080                  # HTTP（/api/health）
+app_port: 8080
 expose_app_port: 8080
-ws_port: 8081                   # WS 帧网关（/ws，代码内硬编码 8081）
+ws_port: 8081
 health_path: /api/health
+go_version: "1.24"
 docker_registry: 192.168.1.7:5000
 docker_registry_cache: 192.168.1.7:5001
 docker_credentials_id: docker-registry-auth
 git_credential_id: chaineasy
 deploy_ssh_cred_id: deploy-server-ssh-key
-go_version: "1.24"
+nacos_serveraddr: 192.168.1.11:8848
+nacos_namespace: ec1145fa-c136-470b-b94b-4fa365312a3d
+nacos_dataid: cland-ws-gateway-service
+nacos_group: DEFAULT_GROUP
+nacos_username: base
+nacos_password: base123
