@@ -32,6 +32,9 @@ pipeline {
 
     environment {
         CGO_ENABLED = "1"
+        GOPROXY     = "https://goproxy.cn,direct"
+        GOSUMDB     = "off"
+        GOTOOLCHAIN = "local"
     }
 
     stages {
@@ -57,7 +60,7 @@ pipeline {
                     // Go 官方镜像（含 gcc，满足 CGO/mattn-go-sqlite3）；走 5001 缓存仓
                     // 镜像自带 registry 主机(5001 缓存仓, 匿名可拉)，不再设 registryUrl，避免二次前缀
                     image "${env.DOCKER_REGISTRY_CACHE}/library/golang:${env.GO_VERSION}-bookworm"
-                    args ' -u 0:0 -e CGO_ENABLED=1 --entrypoint="" -v /var/lib/jenkins/go_cache/mod:/go/pkg/mod -v /var/lib/jenkins/go_cache/build:/root/.cache/go-build'
+                    args ' -u 0:0 --entrypoint="" -e CGO_ENABLED=1 -e GOPROXY=https://goproxy.cn,direct -e GOSUMDB=off -e GOTOOLCHAIN=local -v /var/lib/jenkins/go_cache/mod:/go/pkg/mod -v /var/lib/jenkins/go_cache/build:/root/.cache/go-build'
                     reuseNode true
                 }
             }
