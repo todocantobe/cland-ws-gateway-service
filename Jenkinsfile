@@ -90,7 +90,7 @@ pipeline {
         stage('Build & Push Docker Image') {
             when {
                 expression {
-                    return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /master|main/
+                    return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/
                 }
             }
             steps {
@@ -114,7 +114,7 @@ pipeline {
         stage('Deploy Service') {
             when {
                 expression {
-                    return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /master|main/
+                    return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/
                 }
             }
             steps {
@@ -203,7 +203,7 @@ pipeline {
 
         stage('Merge Back to Master') {
             when {
-                expression { return env.BRANCH_NAME =~ /release\/.*/ }
+                expression { return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ }
             }
             steps {
                 sshagent(credentials: ["${GIT_CREDENTIAL_ID}"]) {
