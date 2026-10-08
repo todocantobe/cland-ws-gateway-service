@@ -1,0 +1,40 @@
+# go-ws 类型配置示例 — Go 服务 + WebSocket（HTTP + WS 双端口, CGO）
+# 用法: bash scripts/generate-jenkinsfile.sh -y templates/jenkins-config-go-ws.yml
+#   或: python3 scripts/generate-jenkinsfile.py -y templates/jenkins-config-go-ws.yml
+type: go-ws
+output: ./Jenkinsfile
+env: dev
+
+# --- 部署目标 ---
+dev_server_ip: 192.168.1.5      # dev 部署节点
+prod_server_ip: 192.168.1.102
+ssh_user: root
+
+# --- 应用 / 端口 ---
+app_name: cland-ws-gateway-service
+app_port: 8080                  # HTTP（容器内）
+expose_app_port: 8080           # HTTP 宿主机暴露
+ws_port: 8081                   # WS 帧网关（额外映射；留空则删除 WS 相关行）
+health_path: /api/health        # 部署后健康检查路径
+
+# --- 工具链 ---
+go_version: "1.24"
+
+# --- 仓库 / 凭证 ---
+docker_registry: 192.168.1.7:5000
+docker_registry_cache: 192.168.1.7:5001
+docker_credentials_id: docker-registry-auth
+git_credential_id: chaineasy
+deploy_ssh_cred_id: deploy-server-ssh-key
+
+# --- Nacos（服务未接入可忽略） ---
+nacos_serveraddr: 192.168.1.11:8848
+nacos_namespace: ec1145fa-c136-470b-b94b-4fa365312a3d
+nacos_dataid: cland-ws-gateway-service
+nacos_group: DEFAULT_GROUP
+nacos_username: base
+nacos_password: base123
+
+# G5 部署后自证：可选（默认关）
+# e2e_cmd: "bash scripts/postdeploy-smoke.sh"   # 可选：核心路径 e2e（app 契约字段）
+# build_json: true                              # 可选：校验 /build.json（buildNo/distSha256）

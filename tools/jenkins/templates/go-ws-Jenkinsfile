@@ -7,15 +7,15 @@ pipeline {
         booleanParam(name: 'RUN_DEPLOY', defaultValue: false, description: '显式请求部署（默认 false：仅构建产镜像，不部署）')
 
         // --- 服务器配置 (生产建议在 Jenkins Job 参数默认值中维护) ---
-        string(name: 'DEV_SERVER_IP', defaultValue: '192.168.1.5', description: 'Dev 环境服务器 IP')
+        string(name: 'DEV_SERVER_IP', defaultValue: '192.168.1.12', description: 'Dev 环境服务器 IP')
         string(name: 'PROD_SERVER_IP', defaultValue: '192.168.1.102', description: 'Prod 环境服务器 IP')
         string(name: 'SSH_USER', defaultValue: 'root', description: '部署服务器 SSH 用户名')
 
         // --- 应用基本信息 ---
         string(name: 'EXPOSE_APP_PORT', defaultValue: '8080', description: 'HTTP 应用暴露端口 (Host Port)')
-        string(name: 'APP_NAME', defaultValue: 'cland-ws-gateway-service', description: '应用服务名称')
+        string(name: 'APP_NAME', defaultValue: 'my-go-service', description: '应用服务名称')
         string(name: 'APP_PORT', defaultValue: '8080', description: 'HTTP 应用内部监听端口 (Container Port)')
-        string(name: 'WS_PORT', defaultValue: '8081', description: 'WebSocket 端口 (双端口服务, 额外映射)')
+        string(name: 'WS_PORT', defaultValue: '@@WS_PORT@@', description: 'WebSocket 端口 (双端口服务, 额外映射)')
         string(name: 'HEALTH_PATH', defaultValue: '/health', description: '部署后健康检查路径 (HTTP GET)')
 
         // --- 仓库地址配置 ---
@@ -27,8 +27,8 @@ pipeline {
 
         // --- Nacos 配置参数 (服务未接入 Nacos 时可忽略) ---
         string(name: 'NACOS_SERVERADDR', defaultValue: '192.168.1.11:8848', description: 'Nacos 服务器地址 (格式: host:port)')
-        string(name: 'NACOS_NAMESPACE', defaultValue: 'ec1145fa-c136-470b-b94b-4fa365312a3d', description: 'Nacos 命名空间 (public 留空)')
-        string(name: 'NACOS_DATAID', defaultValue: 'cland-ws-gateway-service', description: 'Nacos 配置 Data ID')
+        string(name: 'NACOS_NAMESPACE', defaultValue: '@@NACOS_NAMESPACE@@', description: 'Nacos 命名空间 (public 留空)')
+        string(name: 'NACOS_DATAID', defaultValue: 'my-go-service', description: 'Nacos 配置 Data ID')
         string(name: 'NACOS_GROUP', defaultValue: 'DEFAULT_GROUP', description: 'Nacos 配置 Group')
         string(name: 'NACOS_USERNAME', defaultValue: 'base', description: 'Nacos 用户名')
         string(name: 'NACOS_PASSWORD', defaultValue: 'base123', description: 'Nacos 密码')
@@ -237,7 +237,7 @@ pipeline {
                     def scTargetIp = scServerConfig[params.DEPLOY_ENV]
                     sh """
                         if [ -f scripts/selfcheck.sh ]; then
-                            bash scripts/selfcheck.sh --base http://${scTargetIp}:${params.EXPOSE_APP_PORT} --health-path ${params.HEALTH_PATH}
+                            bash scripts/selfcheck.sh --base http://${scTargetIp}:${params.EXPOSE_APP_PORT} --health-path ${params.HEALTH_PATH}@@G5_EXTRA@@
                         else
                             echo "❌ 缺部署后自证脚本 scripts/selfcheck.sh（#398）"; exit 1
                         fi

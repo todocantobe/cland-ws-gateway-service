@@ -1,0 +1,43 @@
+# ===================================================================
+# jenkins-config-ssr.yml — Next.js 前后端不分离 SSR 应用 (Docker + SSH 部署)
+# 用法: bash scripts/generate-jenkinsfile.py -y ./jenkins-config.yml
+# 生成器支持的键见 SKILL.md §17.4；未配置的回退 .env/内置默认。
+# 前置: next.config.js 配 output: "standalone"; 生成器同步输出 Dockerfile
+# ===================================================================
+
+# 项目类型: frontend | frontend-yarn | frontend-docker | frontend-deploy | frontend-ssr | java | python
+type: frontend-ssr
+
+# 输出文件路径（默认 ./Jenkinsfile）
+output: ./Jenkinsfile
+
+# 构建环境: dev | test | prod（作为 DEPLOY_ENV 默认项放首位）
+env: prod
+
+# --- 前端 (npm) ---
+node_version: "22"                                   # Node 版本 (nvm 安装/切换)
+git_credential_id: chaineasy                         # Git 仓库访问凭证 ID
+npm_registry: https://registry.npmmirror.com         # npm 镜像源
+node_options: "--max-old-space-size=4096"            # NODE_OPTIONS
+test_command: "npm run typecheck"                    # 质量门禁命令 (无 test 脚本项目可配 typecheck 或 test_enabled: false)
+test_stage_name: "Type Check"                        # 质量门禁阶段名
+test_enabled: true                                   # 质量门禁阶段开关 (false 时整体移除)
+
+# --- Docker 镜像参数 (frontend-ssr 专属) ---
+image_name: my-ssr-app                               # 镜像名
+docker_registry: registry.example.com                # 私有镜像仓库
+docker_credentials_id: docker-hub                    # 仓库登录凭证 ID
+
+# --- SSH 部署参数 (frontend-ssr 专属; 服务器信息由 Jenkins Job 参数默认值维护) ---
+deploy_host: server.example.com                      # 服务器主机地址（IP 或域名）
+deploy_port: "22"                                    # SSH 端口
+ssh_user: root                                       # SSH 登录用户（云厂商密钥对通常绑定 root）
+deploy_credential_id: deploy-key                     # SSH 私钥凭证 ID
+app_port: "3000"                                     # 容器内应用端口 (Next.js standalone 默认 3000)
+expose_app_port: "3000"                              # 宿主机映射端口
+# 容器环境变量 (每行 KEY=VALUE, 敏感值由 Job 配置/凭据维护, 仓库不保存)
+# app_env_vars: |
+#   NODE_ENV=production
+#   AUTH_SECRET=xxx
+#   DATABASE_URL=postgresql://...
+#   FEEDBACK_API_URL=http://127.0.0.1:8084

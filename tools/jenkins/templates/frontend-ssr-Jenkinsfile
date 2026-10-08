@@ -1,0 +1,288 @@
+// ===================================================================
+// Jenkinsfile — Next.js 前后端不分离 SSR 应用 (standalone + Docker + SSH 部署)
+// 流水线: Checkout → Install → {{TEST_STAGE_NAME}} → Build (next build standalone)
+//        → Docker Build & Push → Deploy to Server (docker run)
+// 生成: python3 scripts/generate-jenkinsfile.py -y ./jenkins-config.yml
+// 前置: ① next.config.js 已配置 output: "standalone"
+//       ② 项目根 Dockerfile 由生成器同步输出 (node:22-alpine + standalone)
+//       ③ 服务器信息由 Jenkins Job 参数默认值维护 (仓库不保存)
+// 环境变量: APP_ENV_VARS 文本参数逐行注入 (KEY=VALUE), 由 Job 配置维护
+//          (如 AUTH_SECRET/DATABASE_URL/FEEDBACK_API_URL 等, 敏感值走 Jenkins 凭据/Job)
+// ===================================================================
+pipeline {
+    agent any
+
+    // --- 参数化构建配置 ---
+    parameters {
+        choice(name: 'DEPLOY_ENV', choices: ['prod', 'dev', 'test'], description: '选择打包的环境模式')
+
+        // --- 版本控制 ---
+        string(name: 'NODE_VERSION', defaultValue: '22', description: '使用的 Node.js 版本 (将由 nvm 安装/切换)')
+
+        // --- 凭证 ID 配置 ---
+        string(name: 'GIT_CREDENTIAL_ID', defaultValue: 'my-spa-git', description: 'Git 仓库访问凭证 ID')
+
+        // --- Docker 镜像参数 ---
+        string(name: 'DOCKER_IMAGE_NAME', defaultValue: 'my-ssr-app', description: 'Docker 镜像名')
+        string(name: 'DOCKER_REGISTRY', defaultValue: 'registry.example.com', description: '私有镜像仓库地址')
+        string(name: 'DOCKER_CREDENTIALS_ID', defaultValue: 'docker-hub', description: '镜像仓库登录凭证 ID')
+
+        // --- SSH 部署参数 (服务器信息由 Jenkins Job 参数默认值维护) ---
+        booleanParam(name: 'RUN_DEPLOY', defaultValue: true, description: '构建后部署到服务器：SSH docker run 启动容器')
+        string(name: 'DEPLOY_HOST', defaultValue: 'server.example.com', description: '服务器主机地址（IP 或域名）——请在 Jenkins Job 参数默认值中填写')
+        string(name: 'DEPLOY_PORT', defaultValue: '22', description: '服务器 SSH 端口')
+        string(name: 'SSH_USER', defaultValue: 'root', description: 'SSH 登录用户（云厂商密钥对通常绑定 root）')
+        string(name: 'DEPLOY_CREDENTIAL_ID', defaultValue: 'deploy-key', description: 'SSH 私钥凭证 ID（Jenkins 凭据管理）')
+        string(name: 'APP_PORT', defaultValue: '3000', description: '容器内应用端口 (Next.js standalone 默认 3000)')
+        string(name: 'EXPOSE_APP_PORT', defaultValue: '3000', description: '宿主机映射端口')
+        string(name: 'HEALTH_PATH', defaultValue: '/health', description: '部署后健康检查路径 (HTTP GET；静态站点可用 / )')
+        text(name: 'APP_ENV_VARS', defaultValue: 'NODE_ENV=production', description: '容器环境变量，每行 KEY=VALUE（AUTH_SECRET/DATABASE_URL/FEEDBACK_API_URL 等，由 Job 配置维护）')
+    }
+
+    environment {
+        NODE_OPTIONS = "--max-old-space-size=4096"
+    }
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '5'))
+        timeout(time: 40, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    stages {
+        stage('Checkout & Init') {
+            steps {
+                checkout scm
+                script {
+                    if (env.BRANCH_NAME == null || env.BRANCH_NAME == '') {
+                        env.BRANCH_NAME = sh(returnStdout: true, script: 'git rev-parse --abbrev-ref HEAD').trim()
+                    }
+                    echo "Current Branch: ${env.BRANCH_NAME}"
+                    echo "Node: ${params.NODE_VERSION} | DEPLOY_ENV: ${params.DEPLOY_ENV} | Deploy: ${params.RUN_DEPLOY}"
+                }
+            }
+        }
+
+        // ⚠ 规则：Install 必须是独立阶段，且位于所有需要依赖的阶段（编译/测试）之前
+        stage('Install Dependencies') {
+            steps {
+                script {
+                    sh """
+                        export NVM_DIR="\$HOME/.nvm"
+                        [ -s "\$NVM_DIR/nvm.sh" ] && . "\$NVM_DIR/nvm.sh"
+
+                        if ! command -v nvm &> /dev/null; then
+                            echo "❌ 错误: 未在系统中找到 nvm，请确保 Jenkins Agent 已安装 nvm。"
+                            exit 1
+                        fi
+
+                        echo "--- 1. 使用 nvm 准备 Node 环境 (${params.NODE_VERSION}) ---"
+                        nvm install ${params.NODE_VERSION}
+                        nvm use ${params.NODE_VERSION}
+
+{{PKG_SETUP}}
+                        echo "--- 2. 环境检查 ---"
+                        node -v
+                        {{PKG_NAME}} -v
+
+                        echo "--- 3. 安装依赖 ---"
+                        {{PKG_INSTALL}}
+                    """
+                }
+            }
+        }
+
+{{TEST_STAGE_BLOCK}}
+        // ⚠ 规则：测试阶段必须在 Install 之后；禁止用 npx 兜底缺失依赖（npx 会临时下载最新版，版本漂移）
+        stage('{{TEST_STAGE_NAME}}') {
+            steps {
+                script {
+                    sh """
+                        export NVM_DIR="\$HOME/.nvm"
+                        [ -s "\$NVM_DIR/nvm.sh" ] && . "\$NVM_DIR/nvm.sh"
+                        nvm use ${params.NODE_VERSION} >/dev/null 2>&1 || nvm install ${params.NODE_VERSION}
+{{PKG_PATH}}
+                        if [ -f scripts/check.sh ]; then
+                            echo "--- 质量门禁: 统一入口 scripts/check.sh (Jenkins/本地同源, #397) ---"
+                            bash scripts/check.sh --stage all
+                        else
+                            echo "--- 质量门禁: {{TEST_COMMAND}} (回退；建议补齐 scripts/check.sh, #397) ---"
+                            {{TEST_COMMAND}}
+                        fi
+                    """
+                }
+            }
+        }
+{{/TEST_STAGE_BLOCK}}
+
+        stage('Next.js Build') {
+            steps {
+                script {
+                    // 字体/网络抖动会让 next build 的字体下载失败（实测遇到过）→ 重试
+                    retry(3) {
+                    sh """
+                        export NVM_DIR="\$HOME/.nvm"
+                        [ -s "\$NVM_DIR/nvm.sh" ] && . "\$NVM_DIR/nvm.sh"
+                        nvm use ${params.NODE_VERSION} >/dev/null 2>&1 || nvm install ${params.NODE_VERSION}
+{{PKG_PATH}}
+                        echo "--- 执行打包 (next build, standalone 输出 .next/standalone) ---"
+                        {{PKG_RUN}} build
+                        echo "--- standalone 产物 ---"
+                        ls -la .next/standalone | head -10
+                    """
+                    }
+                }
+            }
+        }
+
+        stage('Docker Build & Push') {
+            steps {
+                script {
+                    // [校验] Dockerfile 语法: 优先官方 docker build --check (Docker 25+/BuildKit), 无则静态规则
+                    sh """
+                        set -e
+                        echo "--- Dockerfile 语法校验 ---"
+                        if command -v docker >/dev/null 2>&1 && docker build --help 2>&1 | grep -q -- '--check'; then
+                            docker build --check .
+                        else
+                            if grep -nE '^[[:space:]]*(FROM|ARG|COPY|RUN|ENV|WORKDIR|EXPOSE|CMD|ENTRYPOINT|LABEL|USER|ADD) .*#' Dockerfile; then
+                                echo '❌ Dockerfile 存在指令级行尾注释 (Dockerfile 不支持行内 # 注释)'
+                                exit 1
+                            fi
+                            echo '⚠️ 无 docker build --check, 已按静态规则校验通过 (行尾注释/FROM)'
+                        fi
+                    """
+
+                    def tag = "${params.DEPLOY_ENV}-${env.BUILD_NUMBER}"
+                    env.IMAGE_TAG = tag
+                    echo "--- 构建镜像 ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${tag} ---"
+                    withCredentials([usernamePassword(
+                        credentialsId: params.DOCKER_CREDENTIALS_ID,
+                        usernameVariable: 'REGISTRY_USER',
+                        passwordVariable: 'REGISTRY_PASS'
+                    )]) {
+                        // 镜像内 next build 也会拉取字体，网络抖动时重试一次
+                        retry(2) {
+                        sh """
+                            set -e
+                            docker build -t ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${tag} \
+                                         -t ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:latest .
+                            echo "--- 推送镜像到私有仓库 ---"
+                            echo "${REGISTRY_PASS}" | docker login ${params.DOCKER_REGISTRY} -u ${REGISTRY_USER} --password-stdin
+                            docker push ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${tag}
+                            docker push ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:latest
+                            docker logout ${params.DOCKER_REGISTRY}
+                        """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Deploy Gates (G0–G3 · #398)') {
+            when { expression { return params.RUN_DEPLOY } }
+            steps {
+                script {
+                    sh """
+                        if [ -f scripts/deploy-gate.sh ]; then
+                            echo "--- 部署门禁 G0-G3 (env=${params.DEPLOY_ENV}, branch=${env.BRANCH_NAME}) ---"
+                            bash scripts/deploy-gate.sh --env "${params.DEPLOY_ENV}" --branch "${env.BRANCH_NAME}" --run-deploy "${params.RUN_DEPLOY}"
+                        else
+                            echo "❌ 缺部署门禁脚本 scripts/deploy-gate.sh（#398，install-jenkinsfile-gate.sh 安装）"; exit 1
+                        fi
+                    """
+                }
+            }
+        }
+
+        stage('Deploy to Server') {
+            when { expression { return params.RUN_DEPLOY } }
+            steps {
+                script {
+                    if (!params.DEPLOY_HOST || params.DEPLOY_HOST.contains('example.com')) {
+                        error "❌ 未配置 DEPLOY_HOST：请在 Jenkins Job 配置 → 参数化构建过程 → DEPLOY_HOST 默认值中填写服务器地址（IP 或域名）后重试"
+                    }
+{{APP_ENV_CRED_OPEN}}
+                    def appEnvVars = {{APP_ENV_EXPR}}
+                    if (!appEnvVars?.trim()) {
+                        error "❌ 容器环境变量为空：请配置 APP_ENV_VARS 参数或 app_env_credential_id 凭据后重试"
+                    }
+                    // [快速失败] 占位符密钥不允许上到容器（否则应用会以假 AUTH_SECRET / DB 凭据启动，静默坏掉）
+                    if (appEnvVars.contains('SET_IN_JENKINS_JOB') || appEnvVars.contains('change_me') || appEnvVars.contains('change-me-in-production')) {
+                        error "❌ APP_ENV_VARS 仍是占位符（SET_IN_JENKINS_JOB / change_me）：请填写真实密钥（AUTH_SECRET / DB_* 等）后重试"
+                    }
+                    // [安全] 写入文件而不是拼到命令行：writeFile 不打印内容，容器用 --env-file 加载，
+                    //       避免密钥出现在构建日志 / sh -x 跟踪里（曾在 echo envArgs 处泄露 AUTH_SECRET/DB_PASS）
+                    writeFile file: '.deploy-env', text: appEnvVars
+
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: params.DEPLOY_CREDENTIAL_ID,
+                        keyFileVariable: 'DEPLOY_KEY',
+                        usernameVariable: 'DEPLOY_CRED_USER'
+                    )]) {
+                        sh """
+                            set -e
+                            SSH_OPTS="-i \${DEPLOY_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20"
+                            REMOTE="${params.SSH_USER}@${params.DEPLOY_HOST}"
+
+                            if ! ssh \${SSH_OPTS} -o BatchMode=yes -p ${params.DEPLOY_PORT} \${REMOTE} 'echo OK' > /dev/null 2>&1; then
+                                echo "❌ SSH 预检失败：无法以 ${params.SSH_USER}@${params.DEPLOY_HOST} 登录（凭证 ${params.DEPLOY_CREDENTIAL_ID}）"
+                                echo "   排查: ① 用户存在? ② authorized_keys 权限 700/600? ③ 私钥无 passphrase? ④ 密钥对与用户匹配?"
+                                exit 1
+                            fi
+                            echo "✅ SSH 预检通过"
+
+                            echo "--- 部署: 传环境变量文件 + docker pull + 停旧容器 + 启动新容器 ---"
+                            ssh \${SSH_OPTS} -p ${params.DEPLOY_PORT} \${REMOTE} "
+                                set -e
+                                cat > /tmp/${params.DOCKER_IMAGE_NAME}.env
+                                chmod 600 /tmp/${params.DOCKER_IMAGE_NAME}.env
+                                docker pull ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${env.IMAGE_TAG}
+                                docker stop ${params.DOCKER_IMAGE_NAME} 2>/dev/null || true
+                                docker rm ${params.DOCKER_IMAGE_NAME} 2>/dev/null || true
+                                docker run -d --restart=always --name ${params.DOCKER_IMAGE_NAME} \\
+                                    -p ${params.EXPOSE_APP_PORT}:${params.APP_PORT} \\
+                                    --env-file /tmp/${params.DOCKER_IMAGE_NAME}.env \\
+                                    ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${env.IMAGE_TAG}
+                                echo '--- 容器状态 ---'
+                                docker ps --filter name=${params.DOCKER_IMAGE_NAME}
+                            " < .deploy-env
+                            rm -f .deploy-env
+                            echo "✅ 部署成功: ${params.DOCKER_IMAGE_NAME} (${params.EXPOSE_APP_PORT}:${params.APP_PORT}) on ${params.DEPLOY_HOST}"
+                        """
+                    }
+{{APP_ENV_CRED_CLOSE}}
+                }
+            }
+        }
+
+        stage('Post-Deploy Self-Check (G5 · #398)') {
+            when { expression { return params.RUN_DEPLOY } }
+            steps {
+                script {
+                    sh """
+                        if [ -f scripts/selfcheck.sh ]; then
+                            bash scripts/selfcheck.sh --base http://${params.DEPLOY_HOST}:${params.EXPOSE_APP_PORT} --health-path ${params.HEALTH_PATH}@@G5_EXTRA@@
+                        else
+                            echo "❌ 缺部署后自证脚本 scripts/selfcheck.sh（#398）"; exit 1
+                        fi
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Pipeline 成功。镜像 ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${env.IMAGE_TAG}；部署：${params.RUN_DEPLOY ? '已部署到 ' + params.DEPLOY_HOST : '已跳过'}"
+        }
+        failure {
+            echo "❌ Pipeline 失败。请查看 Console Output"
+        }
+        cleanup {
+            echo "--- 清理工作区 ---"
+            cleanWs()
+        }
+    }
+}

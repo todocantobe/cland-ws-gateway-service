@@ -1,0 +1,318 @@
+// ===================================================================
+// Jenkinsfile — 前端 SPA + SSH 部署到服务器（阿里云 ECS 等）
+// 流水线: Checkout → Install → {{TEST_STAGE_NAME}} → Build → Output & Archive → Deploy to Server
+// 生成: bash /home/alice/.agents/skills/jenkins/scripts/generate-jenkinsfile.sh -t frontend-deploy
+// 部署方式: tar 打包 {{BUILD_OUTPUT_DIR}} → scp 上传 → 远端 <base>/releases/<domain>/<build> + current 软链原子切换（多版本/可回滚）
+// 部署要求: RUN_DEPLOY=true 时——
+//   ① Jenkins 凭据配置 SSH 私钥（ID 见参数 DEPLOY_CREDENTIAL_ID）
+//   ② DEPLOY_HOST 等服务器信息在 Jenkins Job 参数默认值中配置（仓库不保存服务器地址）
+//   ③ SSH 登录用户 = 站点属主 = 最小权限普通用户（非 root、无 sudo，见参数 DEPLOY_USER / DEPLOY_BASE）
+//   ④ 多版本：releases/<domain>/<build> 保留 N 版 + current 原子切换；TARGET_RELEASE 可回滚
+// ===================================================================
+pipeline {
+    agent any
+
+    // --- 参数化构建配置 ---
+    parameters {
+        choice(name: 'DEPLOY_ENV', choices: ['prod', 'dev', 'test'], description: '选择打包的环境模式')
+
+        // --- 版本控制 ---
+        // 使用 nvm 时，这里可以直接填写版本号，如 20, 18.15.0, 或 lts/*
+        string(name: 'NODE_VERSION', defaultValue: '24', description: '使用的 Node.js 版本 (将由 nvm 安装/切换)')
+
+        // --- 凭证 ID 配置 ---
+        string(name: 'GIT_CREDENTIAL_ID', defaultValue: 'my-spa-git', description: 'Git 仓库访问凭证 ID')
+
+        // --- nvm 路径（可选；留空则按多路径自动探测）---
+        string(name: 'CUSTOM_NVM_DIR', defaultValue: '', description: '手动指定 nvm 安装目录 (如 /root/.nvm 或 /opt/nvm)')
+
+        // --- SSH 部署参数 ---
+        // 服务器信息由 Jenkins Job 参数默认值维护（仓库不保存服务器地址）
+        // 口径：登录用户 = 站点属主 = 最小权限普通用户（非 root、无 sudo）；多版本 releases/<domain>/<build> + current 原子切换
+        booleanParam(name: 'RUN_DEPLOY', defaultValue: true, description: '构建后部署到服务器：版本化 releases/<domain>/<build> + current 软链原子切换')
+        string(name: 'DEPLOY_HOST', defaultValue: 'server.example.com', description: '服务器主机地址（IP 或域名）——请在 Jenkins Job 参数默认值中填写')
+        string(name: 'DEPLOY_PORT', defaultValue: '22', description: '服务器 SSH 端口')
+        string(name: 'DEPLOY_USER', defaultValue: 'deployuser', description: 'SSH 登录用户（=站点属主，最小权限普通用户，非 root）')
+        string(name: 'DEPLOY_BASE', defaultValue: '/opt/www', description: '站点根（部署基路径）：版本落 <base>/releases/<domain>/<build>，current 软链原子切换')
+        string(name: 'DEPLOY_DOMAIN', defaultValue: 'www.example.com', description: '部署域名')
+        string(name: 'HEALTH_PATH', defaultValue: '/', description: '部署后健康检查路径 (HTTP GET；容器应用常用 /health，静态站点用 / )')
+        string(name: 'DEPLOY_CREDENTIAL_ID', defaultValue: 'deployuser-aliyun-106.15.63.142', description: 'SSH 私钥凭证 ID（Jenkins 凭据管理）')
+        string(name: 'TARGET_RELEASE', defaultValue: '', description: '仅回滚：填 releases/<domain>/ 下已有版本号即切到该版本（留空＝正常发布）')
+        string(name: 'KEEP_RELEASES', defaultValue: '5', description: '保留最近 N 个版本（current 永久保留）')
+    }
+
+    environment {
+        NODE_OPTIONS = "--max-old-space-size=4096"
+    }
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '5'))
+        timeout(time: 40, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    stages {
+        stage('Checkout & Init') {
+            steps {
+                checkout scm
+                script {
+                    if (env.BRANCH_NAME == null || env.BRANCH_NAME == '') {
+                        env.BRANCH_NAME = sh(returnStdout: true, script: 'git rev-parse --abbrev-ref HEAD').trim()
+                    }
+                    echo "Current Branch: ${env.BRANCH_NAME}"
+                    echo "Node: ${params.NODE_VERSION} | DEPLOY_ENV: ${params.DEPLOY_ENV} | Deploy: ${params.RUN_DEPLOY}"
+                }
+            }
+        }
+
+        // ⚠ 规则：Install 必须是独立阶段，且位于所有需要依赖的阶段（编译/测试）之前
+        stage('Install Dependencies') {
+            steps {
+                script {
+                    // 注意：nvm 是一个 shell 函数，必须在同一个 sh 步骤中 source nvm.sh 才能生效
+                    sh """
+                        # --- 探测并加载宿主机现有的 NVM（多路径；支持 CUSTOM_NVM_DIR 手动指定）---
+                        POSSIBLE_DIRS=(
+                            "${params.CUSTOM_NVM_DIR}"
+                            "\$HOME/.nvm"
+                            "/var/lib/jenkins/.nvm"
+                            "/usr/local/nvm"
+                            "/opt/nvm"
+                            "/root/.nvm"
+                        )
+                        NVM_SCRIPT=""
+                        for dir in "\${POSSIBLE_DIRS[@]}"; do
+                            if [ -n "\$dir" ] && [ -s "\$dir/nvm.sh" ]; then
+                                NVM_SCRIPT="\$dir/nvm.sh"
+                                export NVM_DIR="\$dir"
+                                echo "✅ 找到 nvm 于: \$dir"
+                                break
+                            fi
+                        done
+                        if [ -z "\$NVM_SCRIPT" ]; then
+                            echo "❌ 错误: 未找到 nvm（探测: CUSTOM_NVM_DIR / \$HOME/.nvm / /var/lib/jenkins/.nvm / /usr/local/nvm / /opt/nvm / /root/.nvm）"
+                            exit 1
+                        fi
+                        . "\$NVM_SCRIPT"
+
+                        echo "--- 1. 使用 nvm 准备 Node 环境 (${params.NODE_VERSION}) ---"
+                        nvm install ${params.NODE_VERSION}
+                        nvm use ${params.NODE_VERSION}
+
+                        echo "--- 2. 环境检查 ---"
+                        node -v
+                        npm -v
+
+                        echo "--- 3. 安装依赖 (使用淘宝镜像源加速) ---"
+                        npm install --registry=https://registry.npmmirror.com
+                    """
+                }
+            }
+        }
+
+{{TEST_STAGE_BLOCK}}
+        // ⚠ 规则：测试阶段必须在 Install 之后；禁止用 npx 兜底缺失依赖（npx 会临时下载最新版，版本漂移）
+        stage('{{TEST_STAGE_NAME}}') {
+            steps {
+                script {
+                    sh """
+                        export NVM_DIR="\$HOME/.nvm"
+                        [ -s "\$NVM_DIR/nvm.sh" ] && . "\$NVM_DIR/nvm.sh"
+                        nvm use ${params.NODE_VERSION} >/dev/null 2>&1 || nvm install ${params.NODE_VERSION}
+                        if [ -f scripts/check.sh ]; then
+                            echo "--- 质量门禁: 统一入口 scripts/check.sh (Jenkins/本地同源, #397) ---"
+                            bash scripts/check.sh --stage all
+                        else
+                            echo "--- 质量门禁: {{TEST_COMMAND}} (回退；建议补齐 scripts/check.sh, #397) ---"
+                            {{TEST_COMMAND}}
+                        fi
+                    """
+                }
+            }
+        }
+{{/TEST_STAGE_BLOCK}}
+
+        stage('Frontend Build') {
+            steps {
+                script {
+                    sh """
+                        export NVM_DIR="\$HOME/.nvm"
+                        [ -s "\$NVM_DIR/nvm.sh" ] && . "\$NVM_DIR/nvm.sh"
+                        nvm use ${params.NODE_VERSION} >/dev/null 2>&1 || nvm install ${params.NODE_VERSION}
+
+                        echo "--- 执行打包命令 (依赖已由 Install 阶段安装) ---"
+                        if [ "${params.DEPLOY_ENV}" = "prod" ]; then
+                            npm run build
+                        else
+                            npm run build -- --mode ${params.DEPLOY_ENV}
+                        fi
+                    """
+                }
+            }
+        }
+
+        stage('Output & Archive') {
+            steps {
+                script {
+                    echo "========================================================="
+                    echo "🎉 构建完成！产物信息："
+                    def distPath = sh(returnStdout: true, script: 'readlink -f {{BUILD_OUTPUT_DIR}}').trim()
+                    echo "📍 构建产物路径: ${distPath}"
+                    sh "ls -lh ${distPath} ${distPath}/assets | head -30"
+                    echo "========================================================="
+                    archiveArtifacts artifacts: '{{BUILD_OUTPUT_DIR}}/**/*', fingerprint: true, allowEmptyArchive: false
+                    env.STATIC_RESOURCE_PATH = distPath
+                }
+            }
+        }
+
+        stage('Deploy Gates (G0–G3 · #398)') {
+            when { expression { return params.RUN_DEPLOY } }
+            steps {
+                script {
+                    sh """
+                        if [ -f scripts/deploy-gate.sh ]; then
+                            echo "--- 部署门禁 G0-G3 (env=${params.DEPLOY_ENV}, branch=${env.BRANCH_NAME}) ---"
+                            bash scripts/deploy-gate.sh --env "${params.DEPLOY_ENV}" --branch "${env.BRANCH_NAME}" --run-deploy "${params.RUN_DEPLOY}"
+                        else
+                            echo "❌ 缺部署门禁脚本 scripts/deploy-gate.sh（#398，install-jenkinsfile-gate.sh 安装）"; exit 1
+                        fi
+                    """
+                }
+            }
+        }
+
+        stage('Deploy to Server') {
+            when { expression { return params.RUN_DEPLOY } }
+            steps {
+                script {
+                    // 服务器信息在 Jenkins Job 参数默认值中配置；占位符/空值快速失败（避免 DNS 报错难排查）
+                    if (!params.DEPLOY_HOST || params.DEPLOY_HOST.contains('example.com')) {
+                        error "❌ 未配置 DEPLOY_HOST：请在 Jenkins Job 配置 → 参数化构建过程 → DEPLOY_HOST 默认值中填写服务器地址（IP 或域名）后重试"
+                    }
+                    if (params.DEPLOY_USER == 'root') {
+                        error "❌ DEPLOY_USER 不得为 root（最小权限口径：登录用户 = 站点属主 = 普通用户）"
+                    }
+                    // 打包静态产物（{{BUILD_OUTPUT_DIR}}/ 内容，相对路径打包，解压即站点根）
+                    sh """
+                        set -e
+                        echo "--- 打包静态产物 ({{BUILD_OUTPUT_DIR}} → site-dist.tar.gz) ---"
+                        tar -czf site-dist.tar.gz -C {{BUILD_OUTPUT_DIR}} .
+                        ls -lh site-dist.tar.gz
+                    """
+                    // 远端版本化发布脚本（单引号 heredoc：$ 不被 Groovy/本地 shell 展开）
+                    sh '''
+cat > site-deploy-remote.sh <<'REMOTE'
+#!/usr/bin/env bash
+# site-deploy-remote.sh — 版本化发布（releases/<domain>/<build> + current 原子软链切换）
+# 以部署用户（非 root、无 sudo）运行；入参取自环境变量。
+set -euo pipefail
+: "${DEPLOY_BASE:?需 DEPLOY_BASE}"
+: "${DEPLOY_DOMAIN:?需 DEPLOY_DOMAIN}"
+: "${DEPLOY_USER:?需 DEPLOY_USER}"
+TARBALL="${TARBALL:-/tmp/site-dist.tar.gz}"
+BUILD_NUMBER="${BUILD_NUMBER:?需 BUILD_NUMBER}"
+KEEP="${KEEP_RELEASES:-5}"
+TARGET="${TARGET_RELEASE:-}"
+REL="${DEPLOY_BASE}/releases/${DEPLOY_DOMAIN}"
+CUR="${REL}/current"
+mkdir -p "${DEPLOY_BASE}/releases" 2>/dev/null || true
+mkdir -p "${REL}" || { echo "FAIL: 无法创建 ${REL}：${DEPLOY_BASE} 对 ${DEPLOY_USER} 不可写（需一次性 root 建目录并授权）"; exit 9; }
+if [ -n "${TARGET}" ]; then
+  NEW="${REL}/${TARGET}"
+  [ -d "${NEW}" ] || { echo "FAIL: 目标版本不存在 ${NEW}"; exit 2; }
+  ln -sfn "${NEW}" "${CUR}.tmp" && mv -Tf "${CUR}.tmp" "${CUR}"
+  echo "[rollback] current -> $(readlink -f "${CUR}")"
+  exit 0
+fi
+NEW="${REL}/${BUILD_NUMBER}"
+rm -rf "${NEW}"; mkdir -p "${NEW}"
+tar -xzf "${TARBALL}" -C "${NEW}"
+# 发布自证（#268）：build.json 随版本走（回滚即随之变）——外部可复核，免 SSH
+if [ -n "${SOURCE_COMMIT:-}" ]; then
+  DSHA="$(cd "${NEW}" && find . -type f ! -name build.json | sort | xargs -r sha256sum | sha256sum | awk '{print $1}')"
+  printf '{"service":"%s","buildNo":"%s","sourceCommit":"%s","distSha256":"%s","builtAt":"%s"}\n' \
+    "${DEPLOY_DOMAIN}" "${BUILD_NUMBER}" "${SOURCE_COMMIT}" "${DSHA}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${NEW}/build.json"
+  echo "build.json: buildNo=${BUILD_NUMBER} sourceCommit=${SOURCE_COMMIT} distSha256=${DSHA}"
+fi
+ln -sfn "${NEW}" "${CUR}.tmp" && mv -Tf "${CUR}.tmp" "${CUR}"
+CURV="$(basename "$(readlink -f "${CUR}")")"
+ls -1dt "${REL}"/*/ 2>/dev/null | while read -r d; do b="$(basename "${d}")"; [ "${b}" = "${CURV}" ] && continue; echo "${d}"; done | tail -n +$((KEEP+1)) | xargs -r rm -rf
+rm -f "${TARBALL}"
+echo "current -> $(readlink -f "${CUR}")"
+echo "releases:"; ls -1 "${REL}"
+REMOTE
+'''
+                    // SSH 私钥注入 → scp 上传 → 远端版本化发布（非 root）
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: params.DEPLOY_CREDENTIAL_ID,
+                        keyFileVariable: 'DEPLOY_KEY',
+                        usernameVariable: 'DEPLOY_CRED_USER'   // 凭证内用户名仅作参考，登录用户以 DEPLOY_USER 参数为准
+                    )]) {
+                        sh """
+                            set -e
+                            SSH_OPTS="-i \${DEPLOY_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20"
+                            REMOTE="${params.DEPLOY_USER}@${params.DEPLOY_HOST}"
+
+                            # SSH 预检（BatchMode 防挂起；失败给出排查提示，替代裸 Permission denied）
+                            if ! ssh \${SSH_OPTS} -o BatchMode=yes -p ${params.DEPLOY_PORT} \${REMOTE} 'echo OK' > /dev/null 2>&1; then
+                                echo "❌ SSH 预检失败：无法以 ${params.DEPLOY_USER}@${params.DEPLOY_HOST} 登录（凭证 ${params.DEPLOY_CREDENTIAL_ID}）"
+                                echo "   排查顺序："
+                                echo "   ① 服务器上 ${params.DEPLOY_USER} 用户存在？"
+                                echo "   ② 私钥的公钥已写入 /home/${params.DEPLOY_USER}/.ssh/authorized_keys？(目录 700 / 文件 600)"
+                                echo "   ③ 私钥无 passphrase？"
+                                echo "   ④ 密钥对与用户匹配？"
+                                exit 1
+                            fi
+                            echo "✅ SSH 预检通过"
+
+                            echo "--- 1. 上传产物与发布脚本 ---"
+                            scp \${SSH_OPTS} -P ${params.DEPLOY_PORT} site-dist.tar.gz \${REMOTE}:/tmp/site-dist-${env.BUILD_NUMBER}.tar.gz
+                            scp \${SSH_OPTS} -P ${params.DEPLOY_PORT} site-deploy-remote.sh \${REMOTE}:/tmp/site-deploy-remote-${env.BUILD_NUMBER}.sh
+
+                            echo "--- 2. 版本化发布（releases/<domain>/<build> + current 原子切换）---"
+                            ssh \${SSH_OPTS} -p ${params.DEPLOY_PORT} \${REMOTE} "
+                                set -e
+                                env DEPLOY_BASE='${params.DEPLOY_BASE}' DEPLOY_DOMAIN='${params.DEPLOY_DOMAIN}' DEPLOY_USER='${params.DEPLOY_USER}' \\
+                                    BUILD_NUMBER='${env.BUILD_NUMBER}' SOURCE_COMMIT='${env.GIT_COMMIT}' KEEP_RELEASES='${params.KEEP_RELEASES}' TARGET_RELEASE='${params.TARGET_RELEASE}' \\
+                                    TARBALL='/tmp/site-dist-${env.BUILD_NUMBER}.tar.gz' \\
+                                    bash /tmp/site-deploy-remote-${env.BUILD_NUMBER}.sh
+                                rm -f /tmp/site-deploy-remote-${env.BUILD_NUMBER}.sh /tmp/site-dist-${env.BUILD_NUMBER}.tar.gz
+                            "
+                            echo "✅ 部署成功: ${params.DEPLOY_BASE}/releases/${params.DEPLOY_DOMAIN}/current (用户 ${params.DEPLOY_USER})"
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Post-Deploy Self-Check (G5 · #398)') {
+            when { expression { return params.RUN_DEPLOY } }
+            steps {
+                script {
+                    sh """
+                        if [ -f scripts/selfcheck.sh ]; then
+                            bash scripts/selfcheck.sh --base https://${params.DEPLOY_DOMAIN} --health-path ${params.HEALTH_PATH}@@G5_EXTRA@@
+                        else
+                            echo "❌ 缺部署后自证脚本 scripts/selfcheck.sh（#398）"; exit 1
+                        fi
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Pipeline 成功。静态产物已归档（{{BUILD_OUTPUT_DIR}}/**），STATIC_RESOURCE_PATH=${env.STATIC_RESOURCE_PATH}；部署：${params.RUN_DEPLOY ? '已部署到 ' + params.DEPLOY_DOMAIN : '已跳过'}"
+        }
+        failure {
+            echo "❌ Pipeline 失败。请查看 Console Output"
+        }
+        cleanup {
+            echo "--- 清理工作区 ---"
+            cleanWs()
+        }
+    }
+}

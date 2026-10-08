@@ -1,0 +1,97 @@
+pipeline {
+    agent any
+
+    // --- 参数化构建配置 ---
+    parameters {
+        // --- 版本控制 ---
+        string(name: 'PYTHON_VERSION', defaultValue: '3.11', description: 'Python 版本 (需 Agent 已安装 python3.x 或可用 pyenv)')
+
+        // --- 依赖源 ---
+        string(name: 'PIP_INDEX', defaultValue: 'https://pypi.tuna.tsinghua.edu.cn/simple', description: 'pip 镜像源')
+
+        // --- 凭证 ID 配置 ---
+        string(name: 'GIT_CREDENTIAL_ID', defaultValue: 'python-service', description: 'Git 仓库访问凭证 ID')
+    }
+
+    stages {
+        stage('Checkout & Init') {
+            steps {
+                checkout scm
+                script {
+                    if (env.BRANCH_NAME == null || env.BRANCH_NAME == '') {
+                        env.BRANCH_NAME = sh(returnStdout: true, script: 'git rev-parse --abbrev-ref HEAD').trim()
+                    }
+                    echo "Current Branch: ${env.BRANCH_NAME}"
+                }
+            }
+        }
+
+        // ⚠ 规则：Install 必须是独立阶段，且位于所有需要依赖的阶段（测试/打包）之前
+        stage('Install Dependencies') {
+            steps {
+                script {
+                    sh """
+                        echo "--- 1. Python 环境检查 ---"
+                        python3 --version || { echo "❌ 错误: 未在系统中找到 python3，请确保 Jenkins Agent 已安装。"; exit 1; }
+
+                        echo "--- 2. 创建虚拟环境 (避免污染系统 Python) ---"
+                        python3 -m venv .venv
+
+                        echo "--- 3. 安装依赖 (镜像: ${params.PIP_INDEX}) ---"
+                        .venv/bin/pip install --upgrade pip -q
+                        .venv/bin/pip install -r requirements.txt -i ${params.PIP_INDEX}
+                    """
+                }
+            }
+        }
+
+        // ⚠ 规则：测试阶段必须在 Install 之后
+        stage('Unit Test') {
+            steps {
+                script {
+                    sh """
+                        if [ -f scripts/check.sh ]; then
+                            echo "--- 质量门禁: 统一入口 scripts/check.sh (Jenkins/本地同源, #397) ---"
+                            bash scripts/check.sh --stage all
+                        else
+                            echo "--- 单元测试 (pytest；无 tests 时跳过；建议补齐 scripts/check.sh, #397) ---"
+                            if [ -f pytest.ini ] || [ -f pyproject.toml ] || [ -d tests ]; then
+                                .venv/bin/pip install pytest -q
+                                .venv/bin/pytest -q || .venv/bin/python -m pytest -q
+                            else
+                                echo "⚠️ 未发现测试配置 (pytest.ini/pyproject.toml/tests)，跳过测试。"
+                            fi
+                        fi
+                    """
+                }
+            }
+        }
+
+        stage('Package & Archive') {
+            steps {
+                script {
+                    echo "========================================================="
+                    echo "🎉 构建完成！产物信息如下："
+                    sh "ls -lh"
+                    echo "========================================================="
+
+                    // 归档产物（dist/ 或打包目录；无产物时允许空归档）
+                    archiveArtifacts artifacts: 'dist/**,*.whl,*.tar.gz', allowEmptyArchive: true, fingerprint: true
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Pipeline finished successfully."
+        }
+        failure {
+            echo "Pipeline failed. Please check the logs."
+        }
+        cleanup {
+            echo "Cleaning up workspace..."
+            // cleanWs() // 如需保留 .venv/产物供后续手动查看，请注释掉此行
+        }
+    }
+}

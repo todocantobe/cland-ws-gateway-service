@@ -1,0 +1,18 @@
+# ===================================================================
+# jenkins-config-java.yml — Java 微服务 (Spring Boot/Quarkus) 配置示例
+# 用法: bash scripts/generate-jenkinsfile.sh -y ./jenkins-config-java.yml
+# 优先级: 命令行参数 > 本文件 > .env > 内置默认
+# ===================================================================
+
+# 项目类型: frontend | frontend-yarn | frontend-docker | java | python
+type: java
+
+# 输出文件路径（默认 ./Jenkinsfile）
+output: ./Jenkinsfile
+
+# 构建环境: dev | test | prod（BUILD_TYPE 默认项）
+env: test
+
+# --- Java ---
+maven_home: /opt/apache-maven-3.9.6                  # Maven 安装路径
+java_home: /opt/jdk-17                               # JDK 安装路径

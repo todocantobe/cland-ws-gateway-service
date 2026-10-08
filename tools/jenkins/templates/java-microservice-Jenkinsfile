@@ -1,0 +1,75 @@
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'BUILD_TYPE', choices: ['dev', 'test', 'prod'], description: '构建类型')
+        string(name: 'MAVEN_HOME', defaultValue: '/opt/apache-maven-3.9.6', description: 'Maven 安装路径')
+        string(name: 'JAVA_HOME',  defaultValue: '/opt/jdk-17',            description: 'JDK 安装路径')
+        booleanParam(name: 'SKIP_TESTS', defaultValue: false, description: '跳过单元测试')
+    }
+
+    environment {
+        PATH = "${params.MAVEN_HOME}/bin:${params.JAVA_HOME}/bin:${env.PATH}"
+        MVN_CLI_OPTS = "-s ${params.MAVEN_HOME}/conf/settings.xml --batch-mode"
+        MVN_OPTS = "-Dmaven.test.failure.ignore=true"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh """
+                    java -version
+                    mvn -version
+                    echo "--- 编译打包 ---"
+                    mvn clean package ${MVN_CLI_OPTS} ${params.SKIP_TESTS ? '-DskipTests' : ''} ${MVN_OPTS}
+                """
+            }
+        }
+
+        stage('Unit Tests') {
+            when {
+                expression { !params.SKIP_TESTS }
+            }
+            steps {
+                script {
+                    if (fileExists('scripts/check.sh')) {
+                        echo '--- 质量门禁: 统一入口 scripts/check.sh (Jenkins/本地同源, #397) ---'
+                        sh 'bash scripts/check.sh --stage all'
+                    } else {
+                        echo '--- 回退 mvn test（建议补齐 scripts/check.sh, #397）---'
+                        sh "mvn test ${MVN_CLI_OPTS}"
+                    }
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
+                }
+            }
+        }
+
+        stage('Archive Artifacts') {
+            steps {
+                archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Build succeeded. Artifacts archived."
+        }
+        failure {
+            echo "❌ Build failed. Check logs."
+        }
+        always {
+            cleanWs()
+        }
+    }
+}

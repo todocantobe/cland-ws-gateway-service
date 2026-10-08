@@ -1,0 +1,40 @@
+# Rust 微服务 + WebSocket Jenkinsfile 配置示例 (双端口) (由 generate-jenkinsfile.py -y 读取)
+# 未配置的键回退内置默认值; 优先级: 命令行参数 > YAML > 默认值
+type: rust-ws
+output: ./Jenkinsfile
+env: dev            # dev | test | prod (作为 DEPLOY_ENV 默认项放首位)
+
+# 应用信息
+app_name: my-rust-service        # 服务名称 (镜像名/容器名/部署目录 /opt/<app_name>)
+app_port: 8084                   # 容器内部监听端口
+expose_app_port: 8084            # 宿主机暴露端口
+
+# Rust 工具链
+rust_version: 1.90.0             # 编译环境版本 (builder 镜像 tag)
+
+# 服务器
+dev_server_ip: 192.168.1.12      # Dev 部署节点
+prod_server_ip: 192.168.1.102    # Prod 部署节点
+ssh_user: root                   # 部署 SSH 用户
+
+# Docker 仓库
+docker_registry: 192.168.1.7:5000       # 私有仓库 (推送应用镜像/builder 镜像)
+docker_registry_cache: 192.168.1.7:5001 # 公共镜像缓存 (builder 基础镜像来源)
+
+# Nacos 配置中心
+nacos_serveraddr: 192.168.1.11:8848
+nacos_namespace: ec1145fa-c136-470b-b94b-4fa365312a3d  # 命名空间
+nacos_dataid: my-rust-service             # 配置 Data ID
+nacos_group: DEFAULT_GROUP
+nacos_username: base
+nacos_password: base123
+
+# 凭证 (Jenkins Credentials ID)
+git_credential_id: chaineasy
+docker_credentials_id: docker-registry-auth
+deploy_ssh_cred_id: deploy-server-ssh-key
+ws_port: 9090                     # WebSocket 端口 (额外端口映射)
+
+# G5 部署后自证：可选（默认关）
+# e2e_cmd: "bash scripts/postdeploy-smoke.sh"   # 可选：核心路径 e2e（app 契约字段）
+# build_json: true                              # 可选：校验 /build.json（buildNo/distSha256）

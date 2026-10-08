@@ -7,15 +7,15 @@ pipeline {
         booleanParam(name: 'RUN_DEPLOY', defaultValue: false, description: '显式请求部署（默认 false：仅构建产镜像，不部署）')
 
         // --- 服务器配置 (生产建议在 Jenkins Job 参数默认值中维护) ---
-        string(name: 'DEV_SERVER_IP', defaultValue: '192.168.1.5', description: 'Dev 环境服务器 IP')
+        string(name: 'DEV_SERVER_IP', defaultValue: '192.168.1.12', description: 'Dev 环境服务器 IP')
         string(name: 'PROD_SERVER_IP', defaultValue: '192.168.1.102', description: 'Prod 环境服务器 IP')
         string(name: 'SSH_USER', defaultValue: 'root', description: '部署服务器 SSH 用户名')
+        string(name: 'EXPOSE_APP_PORT', defaultValue: '8084', description: '应用暴露端口 (Host Port)')
 
         // --- 应用基本信息 ---
-        string(name: 'EXPOSE_APP_PORT', defaultValue: '8080', description: 'HTTP 应用暴露端口 (Host Port)')
-        string(name: 'APP_NAME', defaultValue: 'cland-ws-gateway-service', description: '应用服务名称')
-        string(name: 'APP_PORT', defaultValue: '8080', description: 'HTTP 应用内部监听端口 (Container Port)')
-        string(name: 'WS_PORT', defaultValue: '8081', description: 'WebSocket 端口 (双端口服务, 额外映射)')
+        string(name: 'APP_NAME', defaultValue: 'my-rust-service', description: '应用服务名称')
+        string(name: 'APP_PORT', defaultValue: '8084', description: '应用内部监听端口 (Container Port)')
+        string(name: 'WS_PORT', defaultValue: '@@WS_PORT@@', description: 'WebSocket 端口 (双端口服务, 额外映射)')
         string(name: 'HEALTH_PATH', defaultValue: '/health', description: '部署后健康检查路径 (HTTP GET)')
 
         // --- 仓库地址配置 ---
@@ -23,12 +23,12 @@ pipeline {
         string(name: 'DOCKER_REGISTRY_CACHE', defaultValue: '192.168.1.7:5001', description: 'Docker 公共镜像缓存/拉取地址')
 
         // --- 版本控制 ---
-        string(name: 'GO_VERSION', defaultValue: '1.24', description: 'Go 编译环境版本')
+        string(name: 'RUST_VERSION', defaultValue: '1.90.0', description: 'Rust 编译环境版本')
 
-        // --- Nacos 配置参数 (服务未接入 Nacos 时可忽略) ---
+        // --- Nacos 配置参数 ---
         string(name: 'NACOS_SERVERADDR', defaultValue: '192.168.1.11:8848', description: 'Nacos 服务器地址 (格式: host:port)')
-        string(name: 'NACOS_NAMESPACE', defaultValue: 'ec1145fa-c136-470b-b94b-4fa365312a3d', description: 'Nacos 命名空间 (public 留空)')
-        string(name: 'NACOS_DATAID', defaultValue: 'cland-ws-gateway-service', description: 'Nacos 配置 Data ID')
+        string(name: 'NACOS_NAMESPACE', defaultValue: 'ec1145fa-c136-470b-b94b-4fa365312a3d', description: 'Nacos 命名空间')
+        string(name: 'NACOS_DATAID', defaultValue: 'my-rust-service', description: 'Nacos 配置 Data ID')
         string(name: 'NACOS_GROUP', defaultValue: 'DEFAULT_GROUP', description: 'Nacos 配置 Group')
         string(name: 'NACOS_USERNAME', defaultValue: 'base', description: 'Nacos 用户名')
         string(name: 'NACOS_PASSWORD', defaultValue: 'base123', description: 'Nacos 密码')
@@ -40,10 +40,7 @@ pipeline {
     }
 
     environment {
-        CGO_ENABLED = "1"
-        GOPROXY     = "https://goproxy.cn,direct"
-        GOSUMDB     = "off"
-        GOTOOLCHAIN = "local"
+        CARGO_TERM_COLOR = "always"
     }
 
     stages {
@@ -63,13 +60,32 @@ pipeline {
             }
         }
 
-        stage('Go Quality & Build') {
+        stage('Prepare Builder Image') {
+            steps {
+                script {
+                    // [提速] 首次构建自动生成并推送 rust-builder 镜像 (含 cmake/rustfmt/clippy), 之后直接复用
+                    def builderImage = "${DOCKER_REGISTRY}/cland-rust-builder:${RUST_VERSION}"
+                    def exists = sh(script: "docker image inspect ${builderImage} >/dev/null 2>&1", returnStatus: true)
+                    if (exists != 0) {
+                        echo "Builder image not found, building & pushing once..."
+                        docker.withRegistry("http://${DOCKER_REGISTRY}", DOCKER_CREDENTIAL_ID) {
+                            sh "docker build --build-arg RUST_BASE_IMAGE=${DOCKER_REGISTRY_CACHE}/library/rust:${RUST_VERSION} -t ${builderImage} -f docker/rust-builder.Dockerfile ."
+                            sh "docker push ${builderImage}"
+                        }
+                    } else {
+                        echo "Builder image exists, skipping."
+                    }
+                }
+            }
+        }
+
+        stage('Rust Quality & Build') {
             agent {
                 docker {
-                    // Go 官方镜像（含 gcc，满足 CGO）；镜像自带 registry 主机(5001 缓存仓, 匿名可拉)，
-                    // 不再设 registryUrl，避免二次前缀
-                    image "${env.DOCKER_REGISTRY_CACHE}/library/golang:${env.GO_VERSION}-bookworm"
-                    args ' -u 0:0 --entrypoint="" -e CGO_ENABLED=1 -e GOPROXY=https://goproxy.cn,direct -e GOSUMDB=off -e GOTOOLCHAIN=local -v /var/lib/jenkins/go_cache/mod:/go/pkg/mod -v /var/lib/jenkins/go_cache/build:/root/.cache/go-build'
+                    // 使用预构建 builder 镜像 (基础镜像从 DOCKER_REGISTRY_CACHE 缓存拉取, 避免直连 Docker Hub)
+                    image "${env.DOCKER_REGISTRY}/cland-rust-builder:${env.RUST_VERSION}"
+                    registryUrl "http://${env.DOCKER_REGISTRY}"
+                    args ' -u 0:0 --entrypoint="" -v /var/lib/jenkins/cargo_cache/registry:/usr/local/cargo/registry -v /var/lib/jenkins/cargo_cache/git:/usr/local/cargo/git'
                     reuseNode true
                 }
             }
@@ -82,14 +98,14 @@ pipeline {
                                 bash scripts/check.sh --stage all
                             else
                                 echo "⚠️ 无 scripts/check.sh，回退内置门禁（请由 harbor 模板补齐统一入口, #397）"
-                                go vet ./...
-                                go test ./...
+                                cargo fmt -- --check
+                                cargo clippy -- -D warnings
+                                cargo test
                             fi
                         '''
 
-                        echo '--- 2. 构建二进制 (CGO, 产物 build/app) ---'
-                        // -buildvcs=false: 容器内 git ownership 导致 VCS stamping exit 128
-                        sh 'mkdir -p build && go build -buildvcs=false -o build/app .'
+                        echo '--- 2. 构建 Release 二进制 ---'
+                        sh 'cargo build --release'
                     }
                 }
             }
@@ -110,7 +126,7 @@ pipeline {
                     def latestImageName = "${APP_NAME}:latest"
 
                     docker.withRegistry("http://${DOCKER_REGISTRY}", DOCKER_CREDENTIAL_ID) {
-                        def app = docker.build(fullImageName, ".")
+                        def app = docker.build(fullImageName, ".")  // 去 --no-cache: 利用 Docker 层缓存加速
                         app.push()
                         sh "docker tag ${fullImageName} ${DOCKER_REGISTRY}/${latestImageName}"
                         sh "docker push ${DOCKER_REGISTRY}/${latestImageName}"
@@ -159,6 +175,7 @@ pipeline {
                     def sshUser = targetConfig.user
                     def latestImageName = "${DOCKER_REGISTRY}/${APP_NAME}:latest"
 
+                    // 遵循《Linux 自研服务部署路径规范》
                     def baseDir = "/opt/${APP_NAME}"
                     def logDir = "${baseDir}/logs"
                     def dataDir = "${baseDir}/data"
@@ -172,7 +189,7 @@ pipeline {
 
                         docker pull ${latestImageName}
 
-                        # 幂等替换旧容器：直接 rm -f（stop+rm 在 restarting 异常态会失败）
+                        # 幂等替换旧容器：stop+rm 在 restarting/异常状态下会失败（曾报 name conflict ✗）⇒ 直接 rm -f
                         docker rm -f ${APP_NAME} >/dev/null 2>&1 || true
 
                         docker run -d \\
@@ -180,9 +197,8 @@ pipeline {
                             --name ${APP_NAME} \\
                             -p ${params.EXPOSE_APP_PORT}:${APP_PORT} \\
                             -p ${params.WS_PORT}:${params.WS_PORT} \\
-                            -v ${logDir}:/app/logs \\
-                            -v ${dataDir}:/app/data \\
-                            -e CLAND_SERVER_PORT=${APP_PORT} \\
+                            -v ${logDir}:/opt/${APP_NAME}/logs \\
+                            -v ${dataDir}:/opt/${APP_NAME}/data \\
                             -e NACOS_SERVERADDR="${params.NACOS_SERVERADDR}" \\
                             -e NACOS_NAMESPACE="${params.NACOS_NAMESPACE}" \\
                             -e NACOS_DATAID="${params.NACOS_DATAID}" \\
@@ -209,8 +225,7 @@ pipeline {
                             }
                         }
                     }
-
-                    // 部署后健康检查（失败即构建失败，杜绝“假成功”）
+                    // 部署后健康检查（约定：默认 /health；失败即构建失败，杜绝“假成功” ✗）
                     def healthUrl = "http://${targetIp}:${params.EXPOSE_APP_PORT}${params.HEALTH_PATH}"
                     echo "健康检查: ${healthUrl}"
                     def healthy = false
@@ -237,7 +252,7 @@ pipeline {
                     def scTargetIp = scServerConfig[params.DEPLOY_ENV]
                     sh """
                         if [ -f scripts/selfcheck.sh ]; then
-                            bash scripts/selfcheck.sh --base http://${scTargetIp}:${params.EXPOSE_APP_PORT} --health-path ${params.HEALTH_PATH}
+                            bash scripts/selfcheck.sh --base http://${scTargetIp}:${params.EXPOSE_APP_PORT} --health-path ${params.HEALTH_PATH}@@G5_EXTRA@@
                         else
                             echo "❌ 缺部署后自证脚本 scripts/selfcheck.sh（#398）"; exit 1
                         fi
@@ -273,7 +288,11 @@ pipeline {
             cleanWs()
             sh "docker image prune -f || true"
         }
-        success { echo "Pipeline finished successfully." }
-        failure { echo "Pipeline failed." }
+        success {
+            echo "Pipeline finished successfully."
+        }
+        failure {
+            echo "Pipeline failed."
+        }
     }
 }
