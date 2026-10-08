@@ -72,11 +72,11 @@ type interventionFrame struct {
 var roleOrder = []string{"perception", "reasoning", "execution", "verification", "coordination"}
 
 var namePools = map[string][]string{
-	"perception":    {"Echo", "Nova", "Pulse", "Vega", "Flux", "Luma"},
-	"reasoning":     {"Cortex", "Muse", "Logic", "Sage", "Astra", "Nexus"},
-	"execution":     {"Forge", "Rig", "Talon", "Hack", "Bolt", "Grit"},
-	"verification":  {"Check", "Verify", "Purity", "Sigma", "Claro", "Valid"},
-	"coordination":  {"Link", "Mesh", "Route", "Relay", "Harmony", "Bridge"},
+	"perception":   {"Echo", "Nova", "Pulse", "Vega", "Flux", "Luma"},
+	"reasoning":    {"Cortex", "Muse", "Logic", "Sage", "Astra", "Nexus"},
+	"execution":    {"Forge", "Rig", "Talon", "Hack", "Bolt", "Grit"},
+	"verification": {"Check", "Verify", "Purity", "Sigma", "Claro", "Valid"},
+	"coordination": {"Link", "Mesh", "Route", "Relay", "Harmony", "Bridge"},
 }
 
 // 角色间对话语料（与前端 AgentSpeech chatTo 同源语义：流水线相邻角色）

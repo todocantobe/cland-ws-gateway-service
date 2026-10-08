@@ -16,15 +16,15 @@ gates:
     cmd: 'test -z "$(gofmt -l .)"'
     on:
       - "**.go"
-    stage: slow
+    stage: fast
   vet:
-    cmd: "go vet ./..."
+    cmd: "GOTOOLCHAIN=local GOPROXY=https://goproxy.cn,direct GOSUMDB=off CGO_ENABLED=1 go vet ./..."
     on:
       - "**.go"
       - "go.mod"
-    stage: slow
+    stage: fast
   test:
-    cmd: "go test ./..."
+    cmd: "GOTOOLCHAIN=local GOPROXY=https://goproxy.cn,direct GOSUMDB=off CGO_ENABLED=1 go test ./..."
     on:
       - "**.go"
       - "go.mod"
