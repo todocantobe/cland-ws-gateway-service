@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# pre-commit hook: 提交门禁 (gate.yaml 驱动)
+# 只跑 stage=fast 且命中暂存文件的检查器; 违规拒绝提交。
+# 由 scripts/install-hooks.sh 安装到 .git/hooks/pre-commit
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "${ROOT}" || exit 1
+
+# 无门禁配置的仓库: 不做校验
+if [[ ! -f gate.yaml ]]; then
+    exit 0
+fi
+if [[ ! -f tools/gate.py ]]; then
+    echo "✗ gate.yaml 存在但缺少 tools/gate.py (请从 alice-pattern-hub 拷贝 tools/)" >&2
+    exit 1
+fi
+
+if ! python3 tools/gate.py --stage fast --changed; then
+    echo "✗ 提交门禁未通过, 请修复后再提交" >&2
+    exit 1
+fi
+echo "✓ 提交门禁通过"

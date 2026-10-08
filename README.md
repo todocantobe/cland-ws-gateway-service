@@ -1,3 +1,14 @@
+---
+title: "Cland Chat Service"
+summary: "基于Go语言的客服聊天系统，采用简洁架构(Clean Architecture)设计。"
+read_when:
+  - "阅读 cland-ws-gateway-service 文档时"
+  - "cland-ws-gateway-service 开发/维护时"
+scope:
+  - service
+status: "active"
+updated: "2026-10-08"
+---
 # Cland Chat Service
 
 基于Go语言的客服聊天系统，采用简洁架构(Clean Architecture)设计。

@@ -1,0 +1,31 @@
+# 提交门禁 (gate.yaml) — cland-ws-gateway-service (Go) · #397
+gates:
+  doclint:
+    cmd: "python3 tools/doclint.py . --quiet"
+    on:
+      - "**.md"
+      - "tools/**"
+    stage: fast
+  structure:
+    type: structure
+    require:
+      - "cmd/"
+      - "core/"
+    stage: fast
+  fmt:
+    cmd: 'test -z "$(gofmt -l .)"'
+    on:
+      - "**.go"
+    stage: slow
+  vet:
+    cmd: "go vet ./..."
+    on:
+      - "**.go"
+      - "go.mod"
+    stage: slow
+  test:
+    cmd: "go test ./..."
+    on:
+      - "**.go"
+      - "go.mod"
+    stage: slow

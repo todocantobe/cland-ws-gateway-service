@@ -1,3 +1,14 @@
+---
+title: "Test Case 001 - Visitor Chat Flow"
+summary: "Test the complete flow when a visitor initiates a chat session."
+read_when:
+  - "阅读 cland-ws-gateway-service 文档时"
+  - "cland-ws-gateway-service 开发/维护时"
+scope:
+  - service
+status: "active"
+updated: "2026-10-08"
+---
 # Test Case 001 - Visitor Chat Flow
 
 ## Description

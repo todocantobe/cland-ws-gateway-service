@@ -1,3 +1,14 @@
+---
+title: "WebSocket 帧转发网关使用文档（USAGE）"
+summary: "> 服务：cland-chat-service · WS 端口 **8081** · 路径 `/ws`"
+read_when:
+  - "阅读 cland-ws-gateway-service 文档时"
+  - "cland-ws-gateway-service 开发/维护时"
+scope:
+  - service
+status: "active"
+updated: "2026-10-08"
+---
 # WebSocket 帧转发网关使用文档（USAGE）
 
 > 服务：cland-chat-service · WS 端口 **8081** · 路径 `/ws`

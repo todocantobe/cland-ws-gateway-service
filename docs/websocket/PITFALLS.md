@@ -1,3 +1,14 @@
+---
+title: "WebSocket 网关接入踩坑记录（PITFALLS）"
+summary: "> 服务：cland-chat-service · 帧转发网关（8081）"
+read_when:
+  - "阅读 cland-ws-gateway-service 文档时"
+  - "cland-ws-gateway-service 开发/维护时"
+scope:
+  - service
+status: "active"
+updated: "2026-10-08"
+---
 # WebSocket 网关接入踩坑记录（PITFALLS）
 
 > 服务：cland-chat-service · 帧转发网关（8081）
