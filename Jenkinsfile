@@ -51,7 +51,12 @@ pipeline {
             steps {
                 checkout scm
                 script {
-                    if (env.BRANCH_NAME == null || env.BRANCH_NAME == '') {
+                    // 发布分支固定值（可选）：配置了 release_branch 则覆盖 SCM 选出的分支；否则用 Jenkins 原生 pick
+                    def fixedRb = "".trim()
+                    if (fixedRb) {
+                        sh "git fetch -q origin ${fixedRb} && git checkout -f ${fixedRb}"
+                        env.BRANCH_NAME = fixedRb
+                    } else if (env.BRANCH_NAME == null || env.BRANCH_NAME == '') {
                         if (env.GIT_BRANCH != null) {
                             env.BRANCH_NAME = env.GIT_BRANCH.replace('origin/', '')
                         } else {

@@ -271,6 +271,27 @@ pipeline {
                 }
             }
         }
+        stage('Merge Back to Master') {
+            when {
+                expression { return env.BRANCH_NAME =~ /release\/.*/ }
+            }
+            steps {
+                sshagent(credentials: ["${GIT_CREDENTIAL_ID}"]) {
+                    script {
+                        echo "Merging ${env.BRANCH_NAME} into @@MERGE_BRANCH@@..."
+                        sh 'git config core.sshCommand "ssh -o StrictHostKeyChecking=no"'
+                        sh 'git config user.email "jenkins@example.com"'
+                        sh 'git config user.name "Jenkins CI"'
+                        sh 'git fetch origin @@MERGE_BRANCH@@'
+                        sh 'git checkout @@MERGE_BRANCH@@'
+                        sh 'git pull origin @@MERGE_BRANCH@@'
+                        sh "git merge --no-ff origin/${env.BRANCH_NAME} -m 'Merge release ${env.BRANCH_NAME} to @@MERGE_BRANCH@@ [Jenkins Build #${env.BUILD_NUMBER}]'"
+                        sh 'git push origin @@MERGE_BRANCH@@'
+                    }
+                }
+            }
+        }
+
     }
 
     post {

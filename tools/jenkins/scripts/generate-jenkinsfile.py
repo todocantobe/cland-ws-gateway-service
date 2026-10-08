@@ -93,12 +93,16 @@ DEFAULTS = {
     "nacos_dataid": "my-rust-service",
     "nacos_group": "DEFAULT_GROUP",
     "nacos_username": "base",
-    "nacos_password": "base123",
+    "nacos_password": "",  # 无内置口令；由各仓 jenkins-config.yml 提供（缺失=空，勿内置默认）
     "deploy_ssh_cred_id": "deploy-server-ssh-key",
     "ws_port": "",
     "health_path": "/health",
     # G5 部署后自证：可选 e2e 冒烟命令 与 /build.json 校验（默认关）
     "e2e_cmd": "",
+    # Merge Back 目标分支（各仓 trunk 可能 main/master）
+    "merge_branch": "master",
+    # 发布分支固定值（留空=自动取最新 release/*）
+    "release_branch": "",
     "build_json": False,
     # go
     "go_version": "1.24",
@@ -295,6 +299,10 @@ def gen_frontend_ssr(cfg) -> str:
         "{{BUILD_OUTPUT_DIR}}": cfg["build_output_dir"],
         "NODE_ENV=production": groovy_single_quote(cfg["app_env_vars"]),
         "@@G5_EXTRA@@": g5_extra(cfg),
+        "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@RELEASE_BRANCH@@": cfg["release_branch"],
+        "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@RELEASE_BRANCH@@": cfg["release_branch"],
         "string(name: 'HEALTH_PATH', defaultValue: '/health'": f"string(name: 'HEALTH_PATH', defaultValue: '{cfg.get('health_path') or '/health'}'",
     }
     # 包管理器(构建类型): npm/yarn/pnpm/bun — 模板占位符统一替换
@@ -339,6 +347,10 @@ def gen_frontend_deploy(cfg) -> str:
         "{{TEST_COMMAND}}": cfg["test_command"],
         "{{BUILD_OUTPUT_DIR}}": cfg["build_output_dir"],
         "@@G5_EXTRA@@": g5_extra(cfg),
+        "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@RELEASE_BRANCH@@": cfg["release_branch"],
+        "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@RELEASE_BRANCH@@": cfg["release_branch"],
         "string(name: 'HEALTH_PATH', defaultValue: '/'": f"string(name: 'HEALTH_PATH', defaultValue: '{cfg.get('health_path') or '/'}'",
     }
     if cfg["npm_registry"]:
@@ -382,13 +394,17 @@ def gen_rust(cfg, template_name="rust-microservice-Jenkinsfile") -> str:
         "defaultValue: '192.168.1.11:8848'": f"defaultValue: '{cfg['nacos_serveraddr']}'",
         "defaultValue: 'DEFAULT_GROUP'": f"defaultValue: '{cfg['nacos_group']}'",
         "defaultValue: 'base'": f"defaultValue: '{cfg['nacos_username']}'",
-        "defaultValue: 'base123'": f"defaultValue: '{cfg['nacos_password']}'",
+        "defaultValue: '@@NACOS_PASSWORD@@'": f"defaultValue: '{cfg['nacos_password']}'",
         "defaultValue: 'chaineasy'": f"defaultValue: '{cfg['git_credential_id']}'",
         "defaultValue: 'docker-registry-auth'": f"defaultValue: '{cfg['docker_credentials_id']}'",
         "defaultValue: 'deploy-server-ssh-key'": f"defaultValue: '{cfg['deploy_ssh_cred_id']}'",
         "choices: ['dev', 'prod', 'test']": build_choices(cfg["env"], "dev prod test"),
         "defaultValue: '/health'": f"defaultValue: '{cfg.get('health_path') or '/health'}'",
         "@@G5_EXTRA@@": g5_extra(cfg),
+        "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@RELEASE_BRANCH@@": cfg["release_branch"],
+        "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@RELEASE_BRANCH@@": cfg["release_branch"],
     }
     content = render(template_name, reps)
     # NACOS_DATAID / NACOS_NAMESPACE 独立替换 (模板占位与 APP_NAME 相同/为空, 需精确到行, 避免被全局替换误伤)
@@ -426,12 +442,16 @@ def gen_go_ws(cfg) -> str:
         "defaultValue: '192.168.1.11:8848'": f"defaultValue: '{cfg['nacos_serveraddr']}'",
         "defaultValue: 'DEFAULT_GROUP'": f"defaultValue: '{cfg['nacos_group']}'",
         "defaultValue: 'base'": f"defaultValue: '{cfg['nacos_username']}'",
-        "defaultValue: 'base123'": f"defaultValue: '{cfg['nacos_password']}'",
+        "defaultValue: '@@NACOS_PASSWORD@@'": f"defaultValue: '{cfg['nacos_password']}'",
         "defaultValue: 'chaineasy'": f"defaultValue: '{cfg['git_credential_id']}'",
         "defaultValue: 'docker-registry-auth'": f"defaultValue: '{cfg['docker_credentials_id']}'",
         "defaultValue: 'deploy-server-ssh-key'": f"defaultValue: '{cfg['deploy_ssh_cred_id']}'",
         "choices: ['dev', 'prod', 'test']": build_choices(cfg["env"], "dev prod test"),
         "@@G5_EXTRA@@": g5_extra(cfg),
+        "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@RELEASE_BRANCH@@": cfg["release_branch"],
+        "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@RELEASE_BRANCH@@": cfg["release_branch"],
     }
     content = render("go-ws-Jenkinsfile", reps)
     # 精确到行替换 (模板默认值可能与 app_name 相同/为空, 避免全局替换误伤)
@@ -618,6 +638,8 @@ def main() -> int:
     parser.add_argument("--ws-port", help="WebSocket 端口 (rust-ws 类型, 双端口映射)")
     parser.add_argument("--e2e-cmd", help="G5 部署后可选 e2e 冒烟命令（如 'bash scripts/postdeploy-smoke.sh'）")
     parser.add_argument("--build-json", action="store_true", help="G5 校验 /build.json（buildNo/distSha256）")
+    parser.add_argument("--merge-branch", help="Merge Back 目标分支（默认 master；trunk 为 main 的服务填 main）")
+    parser.add_argument("--release-branch", help="固定发布分支（留空=自动取最新 release/*）")
     args = parser.parse_args()
 
     if args.list:
@@ -661,6 +683,8 @@ def main() -> int:
         "deploy_ssh_cred_id": args.deploy_ssh_cred_id,
         "ws_port": args.ws_port,
         "e2e_cmd": args.e2e_cmd, "build_json": (True if args.build_json else None),
+        "merge_branch": args.merge_branch,
+        "release_branch": args.release_branch,
     }
     for key, val in cli_map.items():
         if val is not None:

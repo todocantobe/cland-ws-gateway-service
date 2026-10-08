@@ -31,7 +31,7 @@ pipeline {
         string(name: 'NACOS_DATAID', defaultValue: 'my-rust-service', description: 'Nacos 配置 Data ID')
         string(name: 'NACOS_GROUP', defaultValue: 'DEFAULT_GROUP', description: 'Nacos 配置 Group')
         string(name: 'NACOS_USERNAME', defaultValue: 'base', description: 'Nacos 用户名')
-        string(name: 'NACOS_PASSWORD', defaultValue: 'base123', description: 'Nacos 密码')
+        string(name: 'NACOS_PASSWORD', defaultValue: '@@NACOS_PASSWORD@@', description: 'Nacos 密码')
 
         // --- 凭证 ID 配置 ---
         string(name: 'GIT_CREDENTIAL_ID', defaultValue: 'chaineasy', description: 'Git 仓库访问凭证 ID')
@@ -48,7 +48,12 @@ pipeline {
             steps {
                 checkout scm
                 script {
-                    if (env.BRANCH_NAME == null || env.BRANCH_NAME == '') {
+                    // 发布分支固定值（可选）：配置了 release_branch 则覆盖 SCM 选出的分支；否则用 Jenkins 原生 pick
+                    def fixedRb = "@@RELEASE_BRANCH@@".trim()
+                    if (fixedRb) {
+                        sh "git fetch -q origin ${fixedRb} && git checkout -f ${fixedRb}"
+                        env.BRANCH_NAME = fixedRb
+                    } else if (env.BRANCH_NAME == null || env.BRANCH_NAME == '') {
                         if (env.GIT_BRANCH != null) {
                             env.BRANCH_NAME = env.GIT_BRANCH.replace('origin/', '')
                         } else {
@@ -268,15 +273,15 @@ pipeline {
             steps {
                 sshagent(credentials: ["${GIT_CREDENTIAL_ID}"]) {
                     script {
-                        echo "Merging ${env.BRANCH_NAME} into master..."
+                        echo "Merging ${env.BRANCH_NAME} into @@MERGE_BRANCH@@..."
                         sh 'git config core.sshCommand "ssh -o StrictHostKeyChecking=no"'
                         sh 'git config user.email "jenkins@example.com"'
                         sh 'git config user.name "Jenkins CI"'
-                        sh 'git fetch origin master'
-                        sh 'git checkout master'
-                        sh 'git pull origin master'
-                        sh "git merge --no-ff origin/${env.BRANCH_NAME} -m 'Merge release ${env.BRANCH_NAME} to master [Jenkins Build #${env.BUILD_NUMBER}]'"
-                        sh 'git push origin master'
+                        sh 'git fetch origin @@MERGE_BRANCH@@'
+                        sh 'git checkout @@MERGE_BRANCH@@'
+                        sh 'git pull origin @@MERGE_BRANCH@@'
+                        sh "git merge --no-ff origin/${env.BRANCH_NAME} -m 'Merge release ${env.BRANCH_NAME} to @@MERGE_BRANCH@@ [Jenkins Build #${env.BUILD_NUMBER}]'"
+                        sh 'git push origin @@MERGE_BRANCH@@'
                     }
                 }
             }

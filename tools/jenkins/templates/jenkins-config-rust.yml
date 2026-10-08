@@ -27,7 +27,7 @@ nacos_namespace: ec1145fa-c136-470b-b94b-4fa365312a3d  # 命名空间
 nacos_dataid: my-rust-service             # 配置 Data ID
 nacos_group: DEFAULT_GROUP
 nacos_username: base
-nacos_password: base123
+nacos_password: ""            # 不内置口令；敏感值走 env/凭据，勿提交明文
 
 # 凭证 (Jenkins Credentials ID)
 git_credential_id: chaineasy
@@ -37,3 +37,6 @@ deploy_ssh_cred_id: deploy-server-ssh-key
 # G5 部署后自证：可选（默认关）
 # e2e_cmd: "bash scripts/postdeploy-smoke.sh"   # 可选：核心路径 e2e（app 契约字段）
 # build_json: true                              # 可选：校验 /build.json（buildNo/distSha256）
+
+# Merge Back 目标分支（trunk 为 master 用 master；trunk 为 main 的服务填 main）
+merge_branch: master

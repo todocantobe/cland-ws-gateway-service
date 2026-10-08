@@ -78,7 +78,8 @@ fi
 
 # G5c 核心路径 e2e
 if [ -n "$E2E_CMD" ]; then
-    if bash -c "$E2E_CMD"; then ok G5 "核心路径 e2e: ${E2E_CMD}"; else bad G5 "核心路径 e2e 失败: ${E2E_CMD}"; fi
+    # 注入 BASE_URL 供 e2e 脚本使用（app 契约字段用；如 postdeploy-smoke.sh 读 BASE_URL）
+    if BASE_URL="${BASE}" bash -c "$E2E_CMD"; then ok G5 "核心路径 e2e: ${E2E_CMD}"; else bad G5 "核心路径 e2e 失败: ${E2E_CMD}"; fi
 else
     skip G5 "核心路径 e2e 未提供（--e2e-cmd）"
 fi
