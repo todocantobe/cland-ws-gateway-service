@@ -23,3 +23,6 @@ nacos_dataid: cland-ws-gateway-service
 nacos_group: DEFAULT_GROUP
 nacos_username: base
 nacos_password: base123
+
+# Merge Back 目标分支（本仓 trunk = master）
+merge_branch: master
