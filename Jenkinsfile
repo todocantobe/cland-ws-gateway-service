@@ -34,7 +34,7 @@ pipeline {
         string(name: 'NACOS_PASSWORD', defaultValue: 'base123', description: 'Nacos 密码')
 
         // --- 凭证 ID 配置 ---
-        string(name: 'GIT_CREDENTIAL_ID', defaultValue: 'chaineasy', description: 'Git 仓库访问凭证 ID')
+        string(name: 'GIT_CREDENTIAL_ID', defaultValue: 'jenkins_github', description: 'Git 仓库访问凭证 ID')
         string(name: 'DOCKER_CREDENTIAL_ID', defaultValue: 'docker-registry-auth', description: 'Docker 仓库认证凭证 ID')
         string(name: 'DEPLOY_SSH_CRED_ID', defaultValue: 'deploy-server-ssh-key', description: '目标服务器部署 SSH 凭证 ID')
     }
