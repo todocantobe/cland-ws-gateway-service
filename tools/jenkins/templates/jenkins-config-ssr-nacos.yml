@@ -1,0 +1,55 @@
+# ===================================================================
+# jenkins-config-ssr-nacos.yml — Next.js SSR + Nacos 构建期取变量
+# 用法: bash scripts/generate-jenkinsfile.py -y ./jenkins-config.yml
+# 生成: Jenkinsfile (frontend-ssr-nacos) + Dockerfile (standalone)
+# 前置:
+#   ① next.config.js 配 output: "standalone"
+#   ② 项目根 scripts/fetch-nacos-env.mjs（jenkins 技能 install-jenkinsfile-gate.sh 安装）
+#   ③ Nacos 存在该 Data ID 配置，内容为 KEY=VALUE 行或 JSON 对象
+# 与 frontend-ssr 的差异: 环境变量不再走 APP_ENV_VARS 参数，改为构建期从 Nacos 拉取，
+#   渲染 .env(构建) 与 .deploy-env(容器 --env-file)；明文密钥不进 Jenkinsfile/Job/VCS。
+# ===================================================================
+
+# 项目类型
+type: frontend-ssr-nacos
+
+output: ./Jenkinsfile
+env: prod
+
+# --- 前端 (npm) ---
+node_version: "22"
+git_credential_id: chaineasy
+npm_registry: https://registry.npmmirror.com
+node_options: "--max-old-space-size=4096"
+test_command: "npm run typecheck"
+test_stage_name: "Type Check"
+test_enabled: true
+
+# --- Docker 镜像参数 ---
+image_name: my-ssr-app
+docker_registry: 192.168.1.7:5000            # push 上传
+docker_registry_cache: 192.168.1.7:5001        # pull 拉取/基础镜像缓存
+docker_credentials_id: docker-hub
+
+# --- SSH 部署参数 (服务器信息由 Jenkins Job 参数默认值维护) ---
+deploy_host: server.example.com
+deploy_port: "22"
+ssh_user: root
+deploy_credential_id: deploy-key
+app_port: "3000"
+expose_app_port: "3000"
+
+# --- Nacos 配置中心 (构建期取变量) ---
+nacos_serveraddr: 192.168.1.11:8848
+nacos_namespace: ec1145fa-c136-470b-b94b-4fa365312a3d   # public 留空
+nacos_dataid: my-ssr-app                                 # Nacos 配置 Data ID
+nacos_group: DEFAULT_GROUP
+nacos_credential_id: nacos-base-creds               # Jenkins usernamePassword 凭据 ID
+nacos_require: "NODE_ENV,DATABASE_URL,AUTH_SECRET"       # 构建期必需键，缺失即 fail-closed
+
+# G5 部署后自证
+e2e_cmd: "bash scripts/postdeploy-smoke.sh"
+build_json: true
+
+# Merge Back 目标分支
+merge_branch: main

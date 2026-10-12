@@ -25,7 +25,8 @@ test_enabled: true                                   # 质量门禁阶段开关 
 
 # --- Docker 镜像参数 (frontend-ssr 专属) ---
 image_name: my-ssr-app                               # 镜像名
-docker_registry: registry.example.com                # 私有镜像仓库
+docker_registry: 192.168.1.7:5000            # push 上传
+docker_registry_cache: 192.168.1.7:5001        # pull 拉取/基础镜像缓存
 docker_credentials_id: docker-hub                    # 仓库登录凭证 ID
 
 # --- SSH 部署参数 (frontend-ssr 专属; 服务器信息由 Jenkins Job 参数默认值维护) ---

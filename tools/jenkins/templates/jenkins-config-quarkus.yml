@@ -1,0 +1,40 @@
+# ===================================================================
+# jenkins-config-quarkus.yml — Quarkus 微服务 (Maven + Quarkus + Nacos)
+# 用法: python3 scripts/generate-jenkinsfile.py -y ./jenkins-config.yml
+# 生成: Jenkinsfile（模板 templates/quarkus-Jenkinsfile）
+# 凭据命名按 docs/jenkins/Jenkins凭据-命名规范.md
+# ===================================================================
+type: quarkus
+output: ./Jenkinsfile
+env: dev
+
+# --- 构建 ---
+app_name: my-quarkus-service
+maven_version: "3.9.9"
+java_version: "25"
+
+# --- 镜像 ---
+docker_registry: 192.168.1.7:5000
+docker_registry_cache: 192.168.1.7:5001
+docker_credentials_id: docker-192.168.1.7-5000-creds   # 规范名
+
+# --- 部署 ---
+dev_server_ip: 192.168.1.12
+prod_server_ip: 192.168.1.102
+ssh_user: root
+deploy_ssh_cred_id: deploy-192.168.1.12-ssh            # 规范名
+app_port: "8080"
+expose_app_port: "8080"
+
+# --- Nacos（密码走凭据）---
+nacos_serveraddr: 192.168.1.11:8848
+nacos_namespace: f00bead4-47a4-491a-a5e2-66d79f82d8a4
+nacos_group: DEFAULT_GROUP
+nacos_username: chainpay
+nacos_credential_id: nacos-chainpay-creds              # 规范名
+
+# --- Git / GitHub ---
+git_credential_id: git-chaineasy0303-ssh               # 规范名
+github_token_credential_id: github-chaineasy0303-pat   # 规范名
+
+merge_branch: master
