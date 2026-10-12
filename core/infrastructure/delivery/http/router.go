@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"sync"
 
-	"cland.org/cland-chat-service/core/infrastructure/delivery/http/handler"
 	"cland.org/cland-chat-service/core/application"
+	"cland.org/cland-chat-service/core/infrastructure/delivery/http/handler"
 	_ "cland.org/cland-chat-service/docs/swagger"
 	"github.com/gin-gonic/gin"
 	swaggerFiles "github.com/swaggo/files"
@@ -45,13 +45,14 @@ func setupRoutes(r *gin.Engine, chatService *application.ChatService) {
 		c.Next()
 	})
 
+	// 健康检查（标准路径 /health；部署流水线门禁以此为准）
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
 	// API路由分组
 	api := r.Group("/api")
 	{
-		api.GET("/health", func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{"status": "ok"})
-		})
-
 		// User initialization
 		userService := application.NewUserService(
 			chatService.UserRepo,

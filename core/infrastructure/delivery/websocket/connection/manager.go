@@ -1,195 +1,128 @@
 package connection
 
 import (
-	"encoding/json"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 )
 
-// Manager WebSocket连接管理器
+// Manager 连接注册表：cid -> 连接 + 房间成员表。
+// 所有写操作经 WriteTo（每连接写锁串行化，gorilla 要求单 writer）。
 type Manager struct {
-	connections map[string]*websocket.Conn // userID -> connection
-	lastActive  map[string]time.Time       // userID -> last active time
-	rooms       map[string]map[string]bool // roomID -> userIDs
+	connections map[string]*websocket.Conn // cid -> connection
+	connLocks   map[string]*sync.Mutex     // cid -> 写锁（串行化 WriteMessage）
+	rooms       map[string]map[string]bool // roomID -> cid 集合
 	mu          sync.RWMutex
 	log         *zap.Logger
 }
 
-// NewManager 创建WebSocket连接管理器
+// NewManager 创建连接管理器
 func NewManager(log *zap.Logger) *Manager {
 	return &Manager{
 		connections: make(map[string]*websocket.Conn),
-		lastActive:  make(map[string]time.Time),
+		connLocks:   make(map[string]*sync.Mutex),
 		rooms:       make(map[string]map[string]bool),
 		log:         log,
 	}
 }
 
 // AddConnection 添加连接
-func (m *Manager) AddConnection(conn *websocket.Conn, userID string) {
-	if userID == "" {
-		m.log.Error("Empty user ID provided")
+func (m *Manager) AddConnection(conn *websocket.Conn, cid string) {
+	if cid == "" {
+		m.log.Error("Empty cid provided")
 		return
 	}
 
 	m.mu.Lock()
-	m.connections[userID] = conn
-	m.lastActive[userID] = time.Now()
+	m.connections[cid] = conn
+	m.connLocks[cid] = &sync.Mutex{}
 	m.mu.Unlock()
 
-	m.log.Info("New WebSocket connection", zap.String("userID", userID))
+	m.log.Info("New connection", zap.String("cid", cid))
 }
 
-// RemoveConnection 移除连接
-func (m *Manager) RemoveConnection(userID string) {
+// RemoveConnection 移除连接（含所有房间成员资格）
+func (m *Manager) RemoveConnection(cid string) {
 	m.mu.Lock()
-	delete(m.connections, userID)
-	delete(m.lastActive, userID)
-	m.mu.Unlock()
-
-	m.log.Info("WebSocket connection removed", zap.String("userID", userID))
-}
-
-// GetConnection 获取指定用户的连接
-func (m *Manager) GetConnection(userID string) (*websocket.Conn, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	conn, ok := m.connections[userID]
-	return conn, ok
-}
-
-// UpdateLastActive 更新最后活跃时间
-func (m *Manager) UpdateLastActive(userID string) {
-	m.mu.Lock()
-	if _, exists := m.connections[userID]; exists {
-		m.lastActive[userID] = time.Now()
-	}
-	m.mu.Unlock()
-}
-
-// IsConnectionTimeout 检查指定连接是否超时
-func (m *Manager) IsConnectionTimeout(userID string, timeout time.Duration) bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	lastActive, exists := m.lastActive[userID]
-	if !exists {
-		return true // 连接不存在，视为超时
-	}
-
-	return time.Since(lastActive) > timeout
-}
-
-// CheckTimeoutConnections 检查超时连接并关闭
-func (m *Manager) CheckTimeoutConnections(timeout time.Duration) []string {
-	var timedOut []string
-	now := time.Now()
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for userID, lastActive := range m.lastActive {
-		if now.Sub(lastActive) > timeout {
-			if conn, exists := m.connections[userID]; exists {
-				conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "connection timeout"))
-				conn.Close()
-				delete(m.connections, userID)
-				delete(m.lastActive, userID)
-				timedOut = append(timedOut, userID)
+	delete(m.connections, cid)
+	delete(m.connLocks, cid)
+	for roomID, users := range m.rooms {
+		if _, ok := users[cid]; ok {
+			delete(users, cid)
+			if len(users) == 0 {
+				delete(m.rooms, roomID)
 			}
 		}
 	}
+	m.mu.Unlock()
 
-	return timedOut
+	m.log.Info("Connection removed", zap.String("cid", cid))
 }
 
-// SendMessage 发送消息到指定用户
-func (m *Manager) SendMessage(userID string, message interface{}) error {
+// GetConnection 获取用户连接
+func (m *Manager) GetConnection(cid string) (*websocket.Conn, bool) {
 	m.mu.RLock()
-	conn, ok := m.connections[userID]
+	conn, ok := m.connections[cid]
+	m.mu.RUnlock()
+	return conn, ok
+}
+
+// GetRoomUserIDs 获取房间内所有在线成员 cid
+func (m *Manager) GetRoomUserIDs(roomID string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var cids []string
+	if users, exists := m.rooms[roomID]; exists {
+		for cid := range users {
+			if _, ok := m.connections[cid]; ok {
+				cids = append(cids, cid)
+			}
+		}
+	}
+	return cids
+}
+
+// WriteTo 向指定 cid 写二进制帧（带写锁，并发安全）
+func (m *Manager) WriteTo(cid string, data []byte) error {
+	m.mu.RLock()
+	conn, ok := m.connections[cid]
+	lock := m.connLocks[cid]
 	m.mu.RUnlock()
 
 	if !ok {
-		m.log.Warn("User not connected", zap.String("userID", userID))
-		return fmt.Errorf("user %s not connected", userID)
+		return fmt.Errorf("cid %s not connected", cid)
 	}
 
-	// 序列化消息
-	data, err := json.Marshal(message)
-	if err != nil {
-		m.log.Error("Failed to marshal message", zap.Error(err))
-		return err
-	}
-
-	// 发送消息
-	return conn.WriteMessage(websocket.TextMessage, data)
+	lock.Lock()
+	defer lock.Unlock()
+	return conn.WriteMessage(websocket.BinaryMessage, data)
 }
 
 // JoinRoom 加入房间
-func (m *Manager) JoinRoom(userID, roomID string) {
+func (m *Manager) JoinRoom(cid, roomID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if _, exists := m.rooms[roomID]; !exists {
 		m.rooms[roomID] = make(map[string]bool)
 	}
-	m.rooms[roomID][userID] = true
-	m.log.Info("User joined room", zap.String("userID", userID), zap.String("roomID", roomID))
+	m.rooms[roomID][cid] = true
+	m.log.Info("User joined room", zap.String("cid", cid), zap.String("roomID", roomID))
 }
 
 // LeaveRoom 离开房间
-func (m *Manager) LeaveRoom(userID, roomID string) {
+func (m *Manager) LeaveRoom(cid, roomID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if users, exists := m.rooms[roomID]; exists {
-		delete(users, userID)
+		delete(users, cid)
 		if len(users) == 0 {
 			delete(m.rooms, roomID)
 		}
-		m.log.Info("User left room", zap.String("userID", userID), zap.String("roomID", roomID))
+		m.log.Info("User left room", zap.String("cid", cid), zap.String("roomID", roomID))
 	}
-}
-
-// BroadcastMessage 广播消息给多个用户
-func (m *Manager) BroadcastMessage(message interface{}, userIDs []string) error {
-	return m.sendToUsers(message, userIDs)
-}
-
-// BroadcastToRoom 广播消息到房间
-func (m *Manager) BroadcastToRoom(message interface{}, roomID string) error {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if users, exists := m.rooms[roomID]; exists {
-		userIDs := make([]string, 0, len(users))
-		for userID := range users {
-			userIDs = append(userIDs, userID)
-		}
-		return m.sendToUsers(message, userIDs)
-	}
-	return nil
-}
-
-// sendToUsers 内部方法：发送消息给多个用户
-func (m *Manager) sendToUsers(message interface{}, userIDs []string) error {
-	data, err := json.Marshal(message)
-	if err != nil {
-		m.log.Error("Failed to marshal message", zap.Error(err))
-		return err
-	}
-
-	for _, userID := range userIDs {
-		if conn, ok := m.connections[userID]; ok {
-			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }

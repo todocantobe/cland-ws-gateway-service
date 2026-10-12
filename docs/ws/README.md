@@ -1,3 +1,14 @@
+---
+title: "WebSocket 测试客户端（原生，无 socket.io）"
+summary: "cland-chat-service 原生 gorilla/websocket 测试客户端说明：连接、交互式与简化测试用法"
+read_when:
+  - "需要对接/调试 cland-ws-gateway-service WebSocket 时"
+  - "维护 docs/ws 测试客户端时"
+scope:
+  - service
+status: "active"
+updated: "2026-10-13"
+---
 # WebSocket 测试客户端（原生，无 socket.io）
 
 服务端为原生 gorilla/websocket 实现：`ws://localhost:8081/ws?cland-cid=<cid>`

@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"cland.org/cland-chat-service/core/infrastructure/delivery/websocket"
+	"cland.org/cland-chat-service/core/infrastructure/delivery/websocket/gateway"
 
 	"cland.org/cland-chat-service/core/application"
 	"go.uber.org/zap"
@@ -37,26 +37,25 @@ func main() {
 		zapLogger.Fatal("Invalid server port configuration")
 	}
 
-	// Initialize repositories
-	_, messageRepo, sessionRepo, userRepo, err := repository.NewSQLiteRepository("E:/db/RDB/sqlite/cland_chat.db")
-	if err != nil {
-		zapLogger.Fatal("Failed to initialize SQLite repository", zap.Error(err))
-	}
+	// Initialize repositories（极简 WS 网关：内存仓储，无持久化）
+	messageRepo := repository.NewMemoryMessageRepository()
+	sessionRepo := repository.NewMemorySessionRepository()
+	userRepo := repository.NewMemoryUserRepository()
 
-	// Initialize application services
-	chatService := application.NewChatService(
+	// Initialize use cases
+	chatUseCase := application.NewChatService(
 		messageRepo, // messageRepo
 		sessionRepo, // sessionRepo
 		userRepo,    // userRepo
 	)
 
 	// Initialize HTTP router
-	httpRouter := cland_http.GetRouter(chatService)
+	httpRouter := cland_http.GetRouter(chatUseCase)
 	httpRouter.Use(logger.GinRecovery(zapLogger, true))
 	httpRouter.Use(logger.GinLogger(zapLogger))
 
-	// Initialize WebSocket server
-	wsServer := websocket.InitWsServer(zapLogger, chatService)
+	// Initialize WebSocket gateway（原生二进制帧转发，逻辑层自定义）
+	go gateway.InitWsGateway(zapLogger)
 
 	// Create HTTP server
 	httpServer := &http.Server{
@@ -65,9 +64,9 @@ func main() {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(1)
 
-	// Start HTTP server
+	// Start HTTP server (which now includes WebSocket)
 	go func() {
 		defer wg.Done()
 		zapLogger.Info("Starting HTTP server",
@@ -75,12 +74,6 @@ func main() {
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			zapLogger.Fatal("Failed to start HTTP server", zap.Error(err))
 		}
-	}()
-
-	// Start WebSocket server on port 8081
-	go func() {
-		defer wg.Done()
-		wsServer.SetupRoutes(httpRouter)
 	}()
 
 	// Graceful shutdown

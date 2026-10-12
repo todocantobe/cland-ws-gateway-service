@@ -1,0 +1,20 @@
+# ===================================================================
+# jenkins-config-yarn.yml — 前端 SPA (yarn v1) 项目配置示例
+# 用法: bash scripts/generate-jenkinsfile.sh -y ./jenkins-config-yarn.yml
+# 优先级: 命令行参数 > 本文件 > .env > 内置默认
+# ===================================================================
+
+# 项目类型: frontend | frontend-yarn | frontend-docker | java | python
+type: frontend-yarn
+
+# 输出文件路径（默认 ./Jenkinsfile）
+output: ./Jenkinsfile
+
+# 构建环境: dev | test | prod
+env: dev
+
+# --- 前端 (yarn v1: yarn install / yarn test / yarn build) ---
+node_version: "18"                                   # Node 版本 (nvm 安装/切换)
+git_credential_id: yarn-project                      # Jenkins 凭据 ID
+npm_registry: https://registry.npmmirror.com         # yarn v1 install --registry 同源
+node_options: "--max-old-space-size=4096"            # NODE_OPTIONS（覆盖模板默认）

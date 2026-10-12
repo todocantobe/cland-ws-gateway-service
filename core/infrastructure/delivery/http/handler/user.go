@@ -4,9 +4,9 @@ import (
 	"net/http"
 
 	"cland.org/cland-chat-service/common/constants"
+	"cland.org/cland-chat-service/core/application"
 	"cland.org/cland-chat-service/core/domain/repository"
 	"cland.org/cland-chat-service/core/infrastructure/delivery/http/response"
-	"cland.org/cland-chat-service/core/application"
 	"github.com/gin-gonic/gin"
 )
 

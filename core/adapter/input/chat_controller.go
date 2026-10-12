@@ -11,19 +11,19 @@ import (
 type ChatController interface {
 	// SendMessage 发送消息
 	SendMessage(ctx context.Context, message *entity.Message) error
-	
+
 	// GetSessionMessages 获取会话消息
 	GetSessionMessages(ctx context.Context, sessionID string) ([]*entity.Message, error)
-	
+
 	// CreateSession 创建会话
 	CreateSession(ctx context.Context, userID string) (*entity.Session, error)
-	
+
 	// CloseSession 关闭会话
 	CloseSession(ctx context.Context, sessionID string) error
-	
+
 	// GetOfflineMessages 获取离线消息
 	GetOfflineMessages(ctx context.Context, userID string) ([]*entity.Message, error)
-	
+
 	// ProcessMessageStatus 处理消息状态更新
 	ProcessMessageStatus(ctx context.Context, msgID string, newStatus uint8) error
 }

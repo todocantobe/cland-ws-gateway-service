@@ -1,0 +1,182 @@
+pipeline {
+    agent any
+
+    // --- 参数化构建配置 ---
+    parameters {
+        choice(name: 'DEPLOY_ENV', choices: ['dev', 'prod', 'test'], description: '选择打包的环境模式')
+
+        // --- 版本控制 ---
+        // 使用 nvm 时，这里可以直接填写版本号，如 20, 18.15.0, 或 lts/*
+        string(name: 'NODE_VERSION', defaultValue: '22', description: '使用的 Node.js 版本 (将由 nvm 安装/切换)')
+
+        // --- 凭证 ID 配置 ---
+        string(name: 'GIT_CREDENTIAL_ID', defaultValue: 'my-spa-git', description: 'Git 仓库访问凭证 ID')
+
+        // --- Docker 镜像配置 ---
+        string(name: 'DOCKER_IMAGE_NAME', defaultValue: 'my-spa', description: 'Docker 镜像名（不含仓库前缀）')
+        string(name: 'DOCKER_REGISTRY', defaultValue: 'registry.example.com', description: 'Docker 镜像仓库地址')
+        string(name: 'DOCKER_CREDENTIALS_ID', defaultValue: 'docker-hub', description: 'Docker 仓库登录凭证 ID (username/password)')
+    }
+
+    environment {
+        NODE_OPTIONS = "--max-old-space-size=4096"
+        // 如果 nvm 安装在非标准路径，可以在这里指定 NVM_DIR
+        // NVM_DIR = "${HOME}/.nvm"
+    }
+
+    stages {
+        stage('Checkout & Init') {
+            steps {
+                checkout scm
+                script {
+                    if (env.BRANCH_NAME == null || env.BRANCH_NAME == '') {
+                        env.BRANCH_NAME = sh(returnStdout: true, script: 'git rev-parse --abbrev-ref HEAD').trim()
+                    }
+                    echo "Current Branch: ${env.BRANCH_NAME}"
+                }
+            }
+        }
+
+        // ⚠ 规则：Install 必须是独立阶段，且位于所有需要依赖的阶段（编译/测试）之前
+        stage('Install Dependencies') {
+            steps {
+                script {
+                    // 注意：nvm 是一个 shell 函数，必须在同一个 sh 步骤中 source nvm.sh 才能生效
+                    sh """
+                        export NVM_DIR="\$HOME/.nvm"
+                        [ -s "\$NVM_DIR/nvm.sh" ] && . "\$NVM_DIR/nvm.sh"
+
+                        if ! command -v nvm &> /dev/null; then
+                            echo "❌ 错误: 未在系统中找到 nvm，请确保 Jenkins Agent 已安装 nvm。"
+                            exit 1
+                        fi
+
+                        echo "--- 1. 使用 nvm 准备 Node 环境 (${params.NODE_VERSION}) ---"
+                        nvm install ${params.NODE_VERSION}
+                        nvm use ${params.NODE_VERSION}
+
+                        echo "--- 2. 环境检查 ---"
+                        node -v
+                        npm -v
+
+                        echo "--- 3. 安装依赖 (使用淘宝镜像源加速) ---"
+                        npm install --registry=https://registry.npmmirror.com
+                    """
+                }
+            }
+        }
+
+{{TEST_STAGE_BLOCK}}
+        // ⚠ 规则：测试阶段必须在 Install 之后；禁止用 npx 兜底缺失依赖（npx 会临时下载最新版，版本漂移）
+        stage('{{TEST_STAGE_NAME}}') {
+            steps {
+                script {
+                    sh """
+                        export NVM_DIR="\$HOME/.nvm"
+                        [ -s "\$NVM_DIR/nvm.sh" ] && . "\$NVM_DIR/nvm.sh"
+                        nvm use ${params.NODE_VERSION} >/dev/null 2>&1 || nvm install ${params.NODE_VERSION}
+                        if [ -f scripts/check.sh ]; then
+                            echo "--- 质量门禁: 统一入口 scripts/check.sh (Jenkins/本地同源, #397) ---"
+                            bash scripts/check.sh --stage all
+                        else
+                            echo "--- 质量门禁: {{TEST_COMMAND}} (回退；建议补齐 scripts/check.sh, #397) ---"
+                            {{TEST_COMMAND}}
+                        fi
+                    """
+                }
+            }
+        }
+{{/TEST_STAGE_BLOCK}}
+
+        stage('Frontend Build') {
+            steps {
+                script {
+                    sh """
+                        export NVM_DIR="\$HOME/.nvm"
+                        [ -s "\$NVM_DIR/nvm.sh" ] && . "\$NVM_DIR/nvm.sh"
+                        nvm use ${params.NODE_VERSION} >/dev/null 2>&1 || nvm install ${params.NODE_VERSION}
+
+                        echo "--- 执行打包命令 (依赖已由 Install 阶段安装) ---"
+                        if [ "${params.DEPLOY_ENV}" = "prod" ]; then
+                            npm run build
+                        else
+                            npm run build -- --mode ${params.DEPLOY_ENV}
+                        fi
+                    """
+                }
+            }
+        }
+
+        stage('Docker Build & Push') {
+            steps {
+                // 镜像构建推送到私有仓库；凭证从 Jenkins Credentials 注入（禁止硬编码）
+                withCredentials([usernamePassword(
+                    credentialsId: params.DOCKER_CREDENTIALS_ID,
+                    usernameVariable: 'REGISTRY_USER',
+                    passwordVariable: 'REGISTRY_PASS'
+                )]) {
+                    sh """
+                        set -e
+                        IMAGE="${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${BUILD_NUMBER}"
+                        echo "--- Dockerfile 语法校验 ---"
+                        if command -v docker >/dev/null 2>&1 && docker build --help 2>&1 | grep -q -- '--check'; then
+                            docker build --check .
+                        else
+                            if grep -nE '^[[:space:]]*(FROM|ARG|COPY|RUN|ENV|WORKDIR|EXPOSE|CMD|ENTRYPOINT|LABEL|USER|ADD) .*#' Dockerfile; then
+                                echo '❌ Dockerfile 存在指令级行尾注释 (Dockerfile 不支持行内 # 注释)'
+                                exit 1
+                            fi
+                            echo '⚠️ 无 docker build --check, 已按静态规则校验通过 (行尾注释/FROM)'
+                        fi
+                        echo "--- 构建镜像: \${IMAGE} ---"
+                        docker build -t "\${IMAGE}" .
+                        echo "--- 登录并推送 ---"
+                        docker login ${params.DOCKER_REGISTRY} -u "\${REGISTRY_USER}" -p "\${REGISTRY_PASS}"
+                        docker push "\${IMAGE}"
+                        if [ "${params.DEPLOY_ENV}" = "prod" ]; then
+                            LATEST="${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:latest"
+                            docker tag "\${IMAGE}" "\${LATEST}"
+                            docker push "\${LATEST}"
+                            echo "📦 已推送 latest 标签: \${LATEST}"
+                        fi
+                        echo "📦 镜像推送完成: \${IMAGE}"
+                    """
+                }
+            }
+        }
+
+        stage('Output Asset Info') {
+            steps {
+                script {
+                    echo "========================================================="
+                    echo "🎉 编译完成！镜像与静态资源信息如下："
+
+                    echo "🐳 镜像: ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${BUILD_NUMBER}"
+
+                    // 获取 dist 目录的绝对路径
+                    def distPath = sh(returnStdout: true, script: 'readlink -f {{BUILD_OUTPUT_DIR}}').trim()
+
+                    echo "📍 资源绝对路径: ${distPath}"
+                    echo "📂 目录内容清单:"
+                    sh "ls -lh ${distPath}"
+                    echo "========================================================="
+
+                    env.STATIC_RESOURCE_PATH = distPath
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Pipeline finished successfully. Image and static assets are ready."
+        }
+        failure {
+            echo "Pipeline failed. Please check the logs."
+        }
+        cleanup {
+            echo "Cleaning up workspace..."
+            // cleanWs() // 如需保留 dist 目录供后续手动查看，请注释掉此行
+        }
+    }
+}

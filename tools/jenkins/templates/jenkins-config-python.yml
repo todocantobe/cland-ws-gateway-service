@@ -1,0 +1,16 @@
+# ===================================================================
+# jenkins-config-python.yml — Python 服务 (pip + pytest) 配置示例
+# 用法: bash scripts/generate-jenkinsfile.sh -y ./jenkins-config-python.yml
+# 优先级: 命令行参数 > 本文件 > .env > 内置默认
+# ===================================================================
+
+# 项目类型: frontend | frontend-yarn | frontend-docker | java | python
+type: python
+
+# 输出文件路径（默认 ./Jenkinsfile）
+output: ./Jenkinsfile
+
+# --- Python ---
+python_version: "3.11"                               # Python 版本（Agent 需已安装）
+pip_index: https://pypi.tuna.tsinghua.edu.cn/simple  # pip 镜像源
+git_credential_id: python-service                    # Jenkins 凭据 ID

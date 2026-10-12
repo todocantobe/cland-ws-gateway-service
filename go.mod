@@ -1,10 +1,11 @@
 module cland.org/cland-chat-service
 
-go 1.25.3
+go 1.23.0
 
-replace github.com/chaineasy0303/cland-go-share => D:/work/code/go/go-share
+toolchain go1.24.2
 
 require (
+	github.com/alecthomas/template v0.0.0-20190718012654-fb15b899a751
 	github.com/gin-gonic/gin v1.9.1
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/google/uuid v1.6.0

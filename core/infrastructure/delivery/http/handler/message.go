@@ -4,9 +4,9 @@ import (
 	"net/http"
 	"time"
 
+	"cland.org/cland-chat-service/core/application"
 	"cland.org/cland-chat-service/core/domain/entity"
 	"cland.org/cland-chat-service/core/infrastructure/delivery/http/response"
-	"cland.org/cland-chat-service/core/application"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )

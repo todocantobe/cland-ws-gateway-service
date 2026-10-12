@@ -1,3 +1,14 @@
+---
+title: "端到端测试（e2e）"
+summary: "cland-chat-service 端到端测试说明：目录结构、运行前置与用例清单"
+read_when:
+  - "运行/维护 cland-chat-service e2e 测试时"
+  - "新增用户通信端到端用例时"
+scope:
+  - service
+status: "active"
+updated: "2026-10-13"
+---
 # 端到端测试（e2e）
 
 单测与端到端严格分开：单测 `*_test.go` 与源码同目录；端到端在本目录。
