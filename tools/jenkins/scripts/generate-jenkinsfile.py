@@ -8,6 +8,8 @@ generate-jenkinsfile.py — 从模板生成定制化 Jenkinsfile
   frontend-yarn   前端 SPA (yarn v1)    → templates/frontend-yarn-Jenkinsfile
   frontend-docker 前端 SPA + Docker     → templates/frontend-docker-Jenkinsfile
   frontend-deploy 前端 SPA + SSH 部署   → templates/frontend-deploy-Jenkinsfile
+  frontend-ssr    Next.js SSR            → templates/frontend-ssr-Jenkinsfile
+  frontend-ssr-nacos Next.js SSR + Nacos → templates/frontend-ssr-nacos-Jenkinsfile (构建期取变量)
   java            Java 微服务 (Maven)   → templates/java-microservice-Jenkinsfile
   python          Python 服务 (pip)     → templates/python-service-Jenkinsfile
   rust            Rust 微服务 (Cargo)   → templates/rust-microservice-Jenkinsfile
@@ -94,7 +96,16 @@ DEFAULTS = {
     "nacos_group": "DEFAULT_GROUP",
     "nacos_username": "base",
     "nacos_password": "",  # 无内置口令；由各仓 jenkins-config.yml 提供（缺失=空，勿内置默认）
+    # frontend-ssr-nacos: 构建期从 Nacos 取变量
+    "nacos_credential_id": "nacos-base-creds",
+    "nacos_require": "NODE_ENV,DATABASE_URL,AUTH_SECRET",
+    # Merge Back 远程合并用的 GitHub PAT（Jenkins Secret text 凭据 ID）
+    "github_credential_id": "github-hack0303",
     "deploy_ssh_cred_id": "deploy-server-ssh-key",
+    # Go 共享库（#379 · opt-in）：go.mod 的 replace 指向仓库外共享库时启用；
+    #   缺省 None => 模板 marker 整行删除，构建行为与今天逐字节相同。
+    #   形如: go_shared_lib: {repo: owner/name, path: ../go/cland-go-micro-srv-share}
+    "go_shared_lib": None,
     "ws_port": "",
     "health_path": "/health",
     # G5 部署后自证：可选 e2e 冒烟命令 与 /build.json 校验（默认关）
@@ -106,6 +117,10 @@ DEFAULTS = {
     "build_json": False,
     # go
     "go_version": "1.24",
+    # quarkus (java)
+    "maven_version": "3.9.9",
+    "java_version": "25",
+    "github_token_credential_id": "GITHUB_PAT",
 }
 
 TYPES = {
@@ -114,11 +129,13 @@ TYPES = {
     "frontend-docker": ("frontend-docker-Jenkinsfile", "前端 SPA + Docker 镜像推送"),
     "frontend-deploy": ("frontend-deploy-Jenkinsfile", "前端 SPA + SSH 部署"),
     "frontend-ssr": ("frontend-ssr-Jenkinsfile", "Next.js SSR 前后端不分离 (Docker + SSH)"),
+    "frontend-ssr-nacos": ("frontend-ssr-nacos-Jenkinsfile", "Next.js SSR + Nacos 构建期取变量 (Docker + SSH)"),
     "java": ("java-microservice-Jenkinsfile", "Java 微服务 (Maven)"),
     "python": ("python-service-Jenkinsfile", "Python 服务 (pip + pytest)"),
     "rust": ("rust-microservice-Jenkinsfile", "Rust 微服务 (Cargo + Docker + SSH 部署)"),
     "rust-ws": ("rust-ws-Jenkinsfile", "Rust 微服务 + WebSocket (HTTP + WS 双端口)"),
     "go-ws": ("go-ws-Jenkinsfile", "Go 服务 + WebSocket (HTTP + WS 双端口, CGO)"),
+    "quarkus": ("quarkus-Jenkinsfile", "Quarkus 微服务 (Maven + Quarkus + Nacos)"),
 }
 
 
@@ -285,7 +302,8 @@ def gen_frontend_ssr(cfg) -> str:
         "defaultValue: '22'": f"defaultValue: '{cfg['node_version']}'",
         "defaultValue: 'my-spa-git'": f"defaultValue: '{cfg['git_credential_id']}'",
         "defaultValue: 'my-ssr-app'": f"defaultValue: '{cfg['image_name']}'",
-        "defaultValue: 'registry.example.com'": f"defaultValue: '{cfg['docker_registry']}'",
+        "defaultValue: '192.168.1.7:5000'": f"defaultValue: '{cfg['docker_registry']}'",
+        "defaultValue: '192.168.1.7:5001'": f"defaultValue: '{cfg['docker_registry_cache']}'",
         "defaultValue: 'docker-hub'": f"defaultValue: '{cfg['docker_credentials_id']}'",
         "defaultValue: 'server.example.com'": f"defaultValue: '{cfg['deploy_host']}'",
         "defaultValue: '22'": f"defaultValue: '{cfg['deploy_port']}'",
@@ -300,8 +318,10 @@ def gen_frontend_ssr(cfg) -> str:
         "NODE_ENV=production": groovy_single_quote(cfg["app_env_vars"]),
         "@@G5_EXTRA@@": g5_extra(cfg),
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
         "string(name: 'HEALTH_PATH', defaultValue: '/health'": f"string(name: 'HEALTH_PATH', defaultValue: '{cfg.get('health_path') or '/health'}'",
     }
@@ -348,8 +368,10 @@ def gen_frontend_deploy(cfg) -> str:
         "{{BUILD_OUTPUT_DIR}}": cfg["build_output_dir"],
         "@@G5_EXTRA@@": g5_extra(cfg),
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
         "string(name: 'HEALTH_PATH', defaultValue: '/'": f"string(name: 'HEALTH_PATH', defaultValue: '{cfg.get('health_path') or '/'}'",
     }
@@ -395,6 +417,7 @@ def gen_rust(cfg, template_name="rust-microservice-Jenkinsfile") -> str:
         "defaultValue: 'DEFAULT_GROUP'": f"defaultValue: '{cfg['nacos_group']}'",
         "defaultValue: 'base'": f"defaultValue: '{cfg['nacos_username']}'",
         "defaultValue: '@@NACOS_PASSWORD@@'": f"defaultValue: '{cfg['nacos_password']}'",
+        "defaultValue: '@@NACOS_CREDENTIAL_ID@@'": f"defaultValue: '{cfg['nacos_credential_id']}'",
         "defaultValue: 'chaineasy'": f"defaultValue: '{cfg['git_credential_id']}'",
         "defaultValue: 'docker-registry-auth'": f"defaultValue: '{cfg['docker_credentials_id']}'",
         "defaultValue: 'deploy-server-ssh-key'": f"defaultValue: '{cfg['deploy_ssh_cred_id']}'",
@@ -402,8 +425,10 @@ def gen_rust(cfg, template_name="rust-microservice-Jenkinsfile") -> str:
         "defaultValue: '/health'": f"defaultValue: '{cfg.get('health_path') or '/health'}'",
         "@@G5_EXTRA@@": g5_extra(cfg),
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
     }
     content = render(template_name, reps)
@@ -443,14 +468,17 @@ def gen_go_ws(cfg) -> str:
         "defaultValue: 'DEFAULT_GROUP'": f"defaultValue: '{cfg['nacos_group']}'",
         "defaultValue: 'base'": f"defaultValue: '{cfg['nacos_username']}'",
         "defaultValue: '@@NACOS_PASSWORD@@'": f"defaultValue: '{cfg['nacos_password']}'",
+        "defaultValue: '@@NACOS_CREDENTIAL_ID@@'": f"defaultValue: '{cfg['nacos_credential_id']}'",
         "defaultValue: 'chaineasy'": f"defaultValue: '{cfg['git_credential_id']}'",
         "defaultValue: 'docker-registry-auth'": f"defaultValue: '{cfg['docker_credentials_id']}'",
         "defaultValue: 'deploy-server-ssh-key'": f"defaultValue: '{cfg['deploy_ssh_cred_id']}'",
         "choices: ['dev', 'prod', 'test']": build_choices(cfg["env"], "dev prod test"),
         "@@G5_EXTRA@@": g5_extra(cfg),
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
     }
     content = render("go-ws-Jenkinsfile", reps)
@@ -465,12 +493,124 @@ def gen_go_ws(cfg) -> str:
                      f"string(name: 'NACOS_DATAID', defaultValue: '{cfg['nacos_dataid']}'", content)
     content = re.sub(r"string\(name: 'NACOS_NAMESPACE', defaultValue: '[^']*'",
                      f"string(name: 'NACOS_NAMESPACE', defaultValue: '{cfg['nacos_namespace']}'", content)
+    Q3 = chr(39) * 3
     ws = cfg.get("ws_port", "")
     if ws:
         content = content.replace("'@@WS_PORT@@'", f"'{ws}'")
     else:
         # 未配置 WS 端口: 删除 WS 参数行与映射行 (按行过滤)
         content = "".join(ln for ln in content.splitlines(keepends=True) if "WS_PORT" not in ln)
+
+    # Go 共享库（#379 · opt-in）：配了 go_shared_lib 才注入检出步骤，否则整行删除。
+    lib = cfg.get("go_shared_lib") or {}
+    repo = (lib.get("repo") or "").strip()
+    path = (lib.get("path") or "").strip()
+    block = None
+    if repo and path:
+        url = (lib.get("url") or "git@github.com:" + repo + ".git").strip()
+        bl = []
+        bl.append("                        echo '--- 0. Go shared lib sync (#379 go_shared_lib) ---'")
+        bl.append("                        sh " + Q3)
+        bl.append('                            SIB="' + path + '"')
+        bl.append('                            if [ ! -d "$SIB/.git" ]; then')
+        bl.append('                                mkdir -p "$(dirname "$SIB")"')
+        bl.append('                                git clone --depth 1 "' + url + '" "$SIB"')
+        bl.append('                            fi')
+        bl.append('                            echo "shared lib ready: $SIB"')
+        bl.append("                        " + Q3)
+        block = "\n".join(bl) + "\n"
+    out = []
+    for ln in content.splitlines(keepends=True):
+        if "{{GO_SHARED_LIB_BLOCK}}" in ln:
+            if block:
+                out.append(block)
+            continue
+        out.append(ln)
+    return "".join(out)
+
+
+
+def gen_frontend_ssr_nacos(cfg) -> str:
+    """frontend-ssr 变体：构建期从 Nacos 拉取环境变量（单一真源），不再用 APP_ENV_VARS。"""
+    print(f"🔧 环境: {cfg['env']}, Node: {cfg['node_version']}, 构建类型: {cfg['package_manager']}, "
+          f"镜像: {cfg['docker_registry']}/{cfg['image_name']}, "
+          f"Nacos: {cfg['nacos_serveraddr']}/{cfg['nacos_namespace'] or 'public'} dataId={cfg['nacos_dataid']}")
+    expose = cfg["expose_app_port"] if cfg.get("expose_app_port") != "8084" else "3000"
+    reps = {
+        "defaultValue: '22'": f"defaultValue: '{cfg['node_version']}'",
+        "defaultValue: 'my-spa-git'": f"defaultValue: '{cfg['git_credential_id']}'",
+        "defaultValue: '192.168.1.7:5000'": f"defaultValue: '{cfg['docker_registry']}'",
+        "defaultValue: '192.168.1.7:5001'": f"defaultValue: '{cfg['docker_registry_cache']}'",
+        "defaultValue: 'docker-hub'": f"defaultValue: '{cfg['docker_credentials_id']}'",
+        "defaultValue: 'server.example.com'": f"defaultValue: '{cfg['deploy_host']}'",
+        "defaultValue: '22'": f"defaultValue: '{cfg['deploy_port']}'",
+        "defaultValue: 'root'": f"defaultValue: '{cfg['ssh_user']}'",
+        "defaultValue: 'deploy-key'": f"defaultValue: '{cfg['deploy_credential_id']}'",
+        "string(name: 'APP_PORT', defaultValue: '3000'": f"string(name: 'APP_PORT', defaultValue: '{cfg['app_port']}'",
+        "string(name: 'EXPOSE_APP_PORT', defaultValue: '3000'": f"string(name: 'EXPOSE_APP_PORT', defaultValue: '{expose}'",
+        "defaultValue: '192.168.1.11:8848'": f"defaultValue: '{cfg['nacos_serveraddr']}'",
+        "@@NACOS_NAMESPACE@@": f"{cfg['nacos_namespace']}",
+        "defaultValue: 'DEFAULT_GROUP'": f"defaultValue: '{cfg['nacos_group']}'",
+        "defaultValue: 'nacos-base-creds'": f"defaultValue: '{cfg['nacos_credential_id']}'",
+        "{{NACOS_REQUIRE}}": cfg["nacos_require"],
+        "choices: ['dev', 'prod', 'test']": build_choices(cfg["env"], "dev prod test"),
+        "{{TEST_STAGE_NAME}}": cfg["test_stage_name"],
+        "{{TEST_COMMAND}}": cfg["test_command"],
+        "{{BUILD_OUTPUT_DIR}}": cfg["build_output_dir"],
+        "@@G5_EXTRA@@": g5_extra(cfg),
+        "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
+        "@@RELEASE_BRANCH@@": cfg["release_branch"],
+    }
+    # 包管理器(构建类型) 占位符
+    pm = pm_commands(cfg["package_manager"], cfg["npm_registry"])
+    reps["{{PKG_NAME}}"] = pm["name"]
+    reps["{{PKG_INSTALL}}"] = pm["install"]
+    reps["{{PKG_RUN}}"] = pm["run"]
+    reps["{{PKG_SETUP}}"] = pm["setup"]
+    reps["{{PKG_PATH}}"] = pm["path"]
+    content = render("frontend-ssr-nacos-Jenkinsfile", reps)
+    # DOCKER_IMAGE_NAME 与 NACOS_DATAID 模板默认值相同，需精确到行避免误伤
+    content = re.sub(r"string\(name: 'DOCKER_IMAGE_NAME', defaultValue: '[^']*'",
+                     f"string(name: 'DOCKER_IMAGE_NAME', defaultValue: '{cfg['image_name']}'", content)
+    content = re.sub(r"string\(name: 'NACOS_DATAID', defaultValue: '[^']*'",
+                     f"string(name: 'NACOS_DATAID', defaultValue: '{cfg['nacos_dataid']}'", content)
+    content = re.sub(r"string\(name: 'HEALTH_PATH', defaultValue: '[^']*'",
+                     f"string(name: 'HEALTH_PATH', defaultValue: '{cfg.get('health_path') or '/health'}'", content)
+    # outbox 投递器脚本 (#458): 留空=不启用该容器
+    content = re.sub(r"string\(name: 'OUTBOX_DISPATCH_SCRIPT', defaultValue: '[^']*'",
+                     f"string(name: 'OUTBOX_DISPATCH_SCRIPT', defaultValue: '{cfg.get('outbox_dispatcher') or ''}'", content)
+    return strip_test_stage(content, cfg)
+
+
+
+def gen_quarkus(cfg) -> str:
+    print(f"🔧 Quarkus 环境: {cfg['env']}, Maven {cfg['maven_version']}, Java {cfg['java_version']}, "
+          f"应用: {cfg['app_name']}, 部署: {cfg['ssh_user']}@{cfg['dev_server_ip']}:{cfg['expose_app_port']}")
+    reps = {
+        "{{APP_NAME}}": cfg["app_name"],
+        "{{MAVEN_VERSION}}": cfg["maven_version"],
+        "{{JAVA_VERSION}}": cfg["java_version"],
+        "{{DOCKER_REGISTRY}}": cfg["docker_registry"],
+        "{{DOCKER_REGISTRY_CACHE}}": cfg["docker_registry_cache"],
+        "{{DEV_SERVER_IP}}": cfg["dev_server_ip"],
+        "{{PROD_SERVER_IP}}": cfg["prod_server_ip"],
+        "{{SSH_USER}}": cfg["ssh_user"],
+        "{{EXPOSE_APP_PORT}}": str(cfg["expose_app_port"]),
+        "{{APP_PORT}}": str(cfg["app_port"]),
+        "{{NACOS_SERVERADDR}}": cfg["nacos_serveraddr"],
+        "{{NACOS_NAMESPACE}}": cfg["nacos_namespace"],
+        "{{NACOS_GROUP}}": cfg["nacos_group"],
+        "{{NACOS_USERNAME}}": cfg["nacos_username"],
+        "{{NACOS_CREDENTIAL_ID}}": cfg["nacos_credential_id"],
+        "{{GIT_CREDENTIAL_ID}}": cfg["git_credential_id"],
+        "{{DOCKER_CREDENTIAL_ID}}": cfg["docker_credentials_id"],
+        "{{DEPLOY_SSH_CRED_ID}}": cfg["deploy_ssh_cred_id"],
+        "{{GITHUB_TOKEN_CREDENTIAL_ID}}": cfg["github_token_credential_id"],
+        "@@G5_EXTRA@@": g5_extra(cfg),
+    }
+    content = render("quarkus-Jenkinsfile", reps)
+    content = re.sub(r"choices: \['dev', 'prod', 'test'\]", build_choices(cfg["env"], "dev prod test"), content)
     return content
 
 
@@ -480,11 +620,13 @@ GENERATORS = {
     "frontend-docker": gen_frontend_docker,
     "frontend-deploy": gen_frontend_deploy,
     "frontend-ssr": gen_frontend_ssr,
+    "frontend-ssr-nacos": gen_frontend_ssr_nacos,
     "java": gen_java,
     "python": gen_python,
     "rust": gen_rust,
     "rust-ws": gen_rust_ws,
     "go-ws": gen_go_ws,
+    "quarkus": gen_quarkus,
 }
 
 
@@ -504,7 +646,7 @@ def render_ssr_dockerfile(cfg: dict) -> str:
     """渲染 frontend-ssr 的 Next.js standalone Dockerfile 内容 (不落盘)。"""
     with open(os.path.join(TEMPLATES_DIR, "nextjs-standalone.Dockerfile"), encoding="utf-8") as f:
         dcontent = f.read()
-    return dcontent.replace("FROM node:22-alpine", f"FROM node:{cfg['node_version']}-alpine")
+    return dcontent.replace("NODE_BASE_IMAGE=node:22-alpine", f"NODE_BASE_IMAGE=node:{cfg['node_version']}-alpine")
 
 
 def _drift_lines(actual: str, expected: str) -> str:
@@ -581,7 +723,7 @@ def do_check(output: str, expected: str, cfg: dict, show_diff_only: bool) -> int
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="generate-jenkinsfile.py",
-        description="从模板生成定制化 Jenkinsfile (支持 7 种类型, 优先级: CLI > YAML > 默认值)",
+        description="从模板生成定制化 Jenkinsfile (支持 11 种类型, 优先级: CLI > YAML > 默认值)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("-t", "--type", choices=sorted(TYPES), help="项目类型")
@@ -633,6 +775,8 @@ def main() -> int:
     parser.add_argument("--nacos-group", help="Nacos Group")
     parser.add_argument("--nacos-username", help="Nacos 用户名")
     parser.add_argument("--nacos-password", help="Nacos 密码")
+    parser.add_argument("--nacos-credential-id", help="Nacos 账号凭据 ID (usernamePassword, frontend-ssr-nacos)")
+    parser.add_argument("--nacos-require", help="构建期必需环境变量键(逗号分隔, frontend-ssr-nacos)")
     parser.add_argument("--deploy-ssh-cred-id", help="部署 SSH 凭证 ID")
     # rust-ws
     parser.add_argument("--ws-port", help="WebSocket 端口 (rust-ws 类型, 双端口映射)")
@@ -640,6 +784,10 @@ def main() -> int:
     parser.add_argument("--build-json", action="store_true", help="G5 校验 /build.json（buildNo/distSha256）")
     parser.add_argument("--merge-branch", help="Merge Back 目标分支（默认 master；trunk 为 main 的服务填 main）")
     parser.add_argument("--release-branch", help="固定发布分支（留空=自动取最新 release/*）")
+    parser.add_argument("--github-credential-id", help="Merge Back 远程合并用 GitHub PAT 凭据 ID")
+    parser.add_argument("--maven-version", help="Maven 版本 (quarkus)")
+    parser.add_argument("--java-version", help="Java 版本 (quarkus)")
+    parser.add_argument("--github-token-credential-id", help="GitHub Token 凭据 ID (quarkus)")
     args = parser.parse_args()
 
     if args.list:
@@ -680,11 +828,14 @@ def main() -> int:
         "nacos_serveraddr": args.nacos_serveraddr, "nacos_namespace": args.nacos_namespace,
         "nacos_dataid": args.nacos_dataid, "nacos_group": args.nacos_group,
         "nacos_username": args.nacos_username, "nacos_password": args.nacos_password,
+        "nacos_credential_id": args.nacos_credential_id, "nacos_require": args.nacos_require,
         "deploy_ssh_cred_id": args.deploy_ssh_cred_id,
         "ws_port": args.ws_port,
         "e2e_cmd": args.e2e_cmd, "build_json": (True if args.build_json else None),
         "merge_branch": args.merge_branch,
-        "release_branch": args.release_branch,
+        "release_branch": args.release_branch, "github_credential_id": args.github_credential_id,
+        "maven_version": args.maven_version, "java_version": args.java_version,
+        "github_token_credential_id": args.github_token_credential_id,
     }
     for key, val in cli_map.items():
         if val is not None:
@@ -730,7 +881,7 @@ def main() -> int:
     print(f"✅ Jenkinsfile 已生成 → {output}")
 
     # --- frontend-ssr: 同步输出 Next.js standalone Dockerfile (项目根, 与 Jenkinsfile 同目录) ---
-    if cfg["type"] == "frontend-ssr":
+    if cfg["type"] in ("frontend-ssr", "frontend-ssr-nacos"):
         dockerfile_path = os.path.join(os.path.dirname(output) or ".", "Dockerfile")
         with open(dockerfile_path, "w", encoding="utf-8") as f:
             f.write(render_ssr_dockerfile(cfg))

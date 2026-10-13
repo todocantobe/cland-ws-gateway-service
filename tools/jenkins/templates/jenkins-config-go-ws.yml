@@ -33,7 +33,7 @@ nacos_namespace: ec1145fa-c136-470b-b94b-4fa365312a3d
 nacos_dataid: cland-ws-gateway-service
 nacos_group: DEFAULT_GROUP
 nacos_username: base
-nacos_password: ""            # 不内置口令；敏感值走 env/凭据，勿提交明文
+nacos_credential_id: nacos-base-creds   # Nacos 密码凭据（密码不落明文）
 
 # G5 部署后自证：可选（默认关）
 # e2e_cmd: "bash scripts/postdeploy-smoke.sh"   # 可选：核心路径 e2e（app 契约字段）

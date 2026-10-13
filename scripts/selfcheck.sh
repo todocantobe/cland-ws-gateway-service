@@ -65,12 +65,13 @@ try:
     d = json.load(open(sys.argv[1], encoding='utf-8'))
 except Exception as e:
     print(f"parse-fail: {e}"); sys.exit(1)
-missing = [k for k in ("buildNo", "distSha256") if not d.get(k)]
+missing = [k for k in ("buildNo",) if not d.get(k)]   # buildNo 必需；distSha256 可选（生成件哈希，非所有应用提供）
 if missing:
     print("missing: " + ",".join(missing)); sys.exit(1)
-print(f"buildNo={d['buildNo']} distSha256={str(d['distSha256'])[:12]}…"); sys.exit(0)
+_ds = d.get("distSha256")
+print("buildNo=" + str(d["buildNo"]) + (" distSha256=" + str(_ds)[:12] + "…" if _ds else " (distSha256 未提供, 可接受)")); sys.exit(0)
 PY
-    then ok G5 "/build.json 含 buildNo/distSha256"; else bad G5 "/build.json 字段缺失或非法"; fi
+    then ok G5 "/build.json 含 buildNo（distSha256 可选）"; else bad G5 "/build.json 字段缺失或非法"; fi
     rm -f "$tmp" "$hdr"
 else
     skip G5 "/build.json 未要求（--build-json 未开）"

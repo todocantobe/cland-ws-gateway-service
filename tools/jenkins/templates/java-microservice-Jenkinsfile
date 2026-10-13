@@ -69,7 +69,8 @@ pipeline {
             echo "❌ Build failed. Check logs."
         }
         always {
-            cleanWs()
+            // 用 shell 快删替代 cleanWs()（避免 ws-cleanup 异步残留堆积，见 docs/ops/Jenkins-workspace-膨胀治理-操作手册.md）
+            sh 'rm -rf -- * .[^.]* || true'
         }
     }
 }

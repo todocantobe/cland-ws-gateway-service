@@ -24,7 +24,8 @@ pipeline {
 
         // --- Docker 镜像参数 ---
         string(name: 'DOCKER_IMAGE_NAME', defaultValue: 'my-ssr-app', description: 'Docker 镜像名')
-        string(name: 'DOCKER_REGISTRY', defaultValue: 'registry.example.com', description: '私有镜像仓库地址')
+        string(name: 'DOCKER_REGISTRY', defaultValue: '192.168.1.7:5000', description: 'Docker 私有仓库上传地址 (push)')
+        string(name: 'DOCKER_REGISTRY_CACHE', defaultValue: '192.168.1.7:5001', description: 'Docker 拉取地址/公共镜像缓存 (pull + 基础镜像)')
         string(name: 'DOCKER_CREDENTIALS_ID', defaultValue: 'docker-hub', description: '镜像仓库登录凭证 ID')
 
         // --- SSH 部署参数 (服务器信息由 Jenkins Job 参数默认值维护) ---
@@ -56,7 +57,22 @@ pipeline {
                 checkout scm
                 script {
                     if (env.BRANCH_NAME == null || env.BRANCH_NAME == '') {
-                        env.BRANCH_NAME = sh(returnStdout: true, script: 'git rev-parse --abbrev-ref HEAD').trim()
+                        // 分支识别（#455 同尖消歧）：GIT_BRANCH 优先 → for-each-ref 按「可部署分支优先」确定化 → name-rev 兜底
+                        // 旧逻辑仅用 name-rev，多 ref 同指一 commit（develop 与 release/* 同尖）时不确定，会误判 develop
+                        env.BRANCH_NAME = sh(returnStdout: true, script: '''
+                            b=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+                            if [ -z "$b" ] || [ "$b" = "HEAD" ]; then
+                                b="${GIT_BRANCH#origin/}"
+                            fi
+                            if [ -z "$b" ] || [ "$b" = "HEAD" ]; then
+                                # name-rev 在多 ref 同指一 commit 时选择不确定(如 develop 与 release/* 同尖) → 按「可部署分支优先」确定化
+                                b=$(git for-each-ref --points-at HEAD --format='%(refname:short)' refs/remotes/origin 2>/dev/null | sed 's#^origin/##' | grep -v '^HEAD$' | awk 'BEGIN{p=99}{q=99; if(index($0,"release/")==1||index($0,"hotfix/")==1)q=1; else if($0=="main"||$0=="master")q=2; else if($0=="develop"||$0=="dev")q=3; if(q<p){p=q;r=$0}}END{print r}')
+                            fi
+                            if [ -z "$b" ]; then
+                                b=$(git name-rev --name-only --refs="refs/remotes/origin/*" HEAD 2>/dev/null | sed 's#^remotes/origin/##; s#^origin/##' | cut -d'^' -f1)
+                            fi
+                            echo "$b"
+                        ''').trim()
                     }
                     echo "Current Branch: ${env.BRANCH_NAME}"
                     echo "Node: ${params.NODE_VERSION} | DEPLOY_ENV: ${params.DEPLOY_ENV} | Deploy: ${params.RUN_DEPLOY}"
@@ -119,6 +135,12 @@ pipeline {
         stage('Next.js Build') {
             steps {
                 script {
+                    // 构建期注入环境变量：Next 的 env 校验会在 next build 时读取 .env（#207 教训）
+                    def buildEnvVars = {{APP_ENV_EXPR}}
+                    if (buildEnvVars?.trim()) {
+                        writeFile file: '.env', text: buildEnvVars
+                        echo '--- 已写入 .env（构建期环境变量）---'
+                    }
                     // 字体/网络抖动会让 next build 的字体下载失败（实测遇到过）→ 重试
                     retry(3) {
                     sh """
@@ -126,6 +148,8 @@ pipeline {
                         [ -s "\$NVM_DIR/nvm.sh" ] && . "\$NVM_DIR/nvm.sh"
                         nvm use ${params.NODE_VERSION} >/dev/null 2>&1 || nvm install ${params.NODE_VERSION}
 {{PKG_PATH}}
+                        # next.config 不读 .env（Next.js 限制）—— 显式 source，供构建期 next.config 读取（如 BUILD_STANDALONE）
+                        if [ -f .env ]; then set -a; . ./.env; set +a; fi
                         echo "--- 执行打包 (next build, standalone 输出 .next/standalone) ---"
                         {{PKG_RUN}} build
                         echo "--- standalone 产物 ---"
@@ -166,7 +190,8 @@ pipeline {
                         retry(2) {
                         sh """
                             set -e
-                            docker build -t ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${tag} \
+                            docker build --build-arg NODE_BASE_IMAGE=${params.DOCKER_REGISTRY_CACHE}/library/node:${params.NODE_VERSION}-alpine \
+                                         -t ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${tag} \
                                          -t ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:latest .
                             echo "--- 推送镜像到私有仓库 ---"
                             echo "${REGISTRY_PASS}" | docker login ${params.DOCKER_REGISTRY} -u ${REGISTRY_USER} --password-stdin
@@ -276,17 +301,24 @@ pipeline {
                 expression { return env.BRANCH_NAME =~ /release\/.*/ }
             }
             steps {
-                sshagent(credentials: ["${GIT_CREDENTIAL_ID}"]) {
-                    script {
-                        echo "Merging ${env.BRANCH_NAME} into @@MERGE_BRANCH@@..."
-                        sh 'git config core.sshCommand "ssh -o StrictHostKeyChecking=no"'
-                        sh 'git config user.email "jenkins@example.com"'
-                        sh 'git config user.name "Jenkins CI"'
-                        sh 'git fetch origin @@MERGE_BRANCH@@'
-                        sh 'git checkout @@MERGE_BRANCH@@'
-                        sh 'git pull origin @@MERGE_BRANCH@@'
-                        sh "git merge --no-ff origin/${env.BRANCH_NAME} -m 'Merge release ${env.BRANCH_NAME} to @@MERGE_BRANCH@@ [Jenkins Build #${env.BUILD_NUMBER}]'"
-                        sh 'git push origin @@MERGE_BRANCH@@'
+                script {
+                    // 远程合并（GitHub merge API，服务端）——不做本地 checkout/merge/push，避开本地钩子(husky)
+                    def url = sh(returnStdout: true, script: 'git remote get-url origin').trim()
+                    def slug = url.replaceAll(/^(git@|https?:\/\/)[^\/:]+[:\/]/, '').replaceAll(/\.git$/, '')
+                    def parts = slug.split('/')
+                    def owner = parts[0]; def repo = parts[1]
+                    echo "Remote merge ${env.BRANCH_NAME} -> @@MERGE_BRANCH@@ via GitHub API (${slug})"
+                    withCredentials([string(credentialsId: '@@GITHUB_CREDENTIAL_ID@@', variable: 'GH_TOKEN')]) {
+                        sh """
+                            set -e
+                            code=\$(curl -s -o /tmp/mg.json -w '%{http_code}' -X POST \
+                              -H "Authorization: Bearer \$GH_TOKEN" \
+                              -H "Accept: application/vnd.github+json" \
+                              "https://api.github.com/repos/${owner}/${repo}/merges" \
+                              -d '{"base":"@@MERGE_BRANCH@@","head":"${env.BRANCH_NAME}"}')
+                            echo "GitHub merge HTTP \$code"; cat /tmp/mg.json 2>/dev/null; echo
+                            case "\$code" in 201|204) echo "✅ GitHub 远程合并完成（base=@@MERGE_BRANCH@@ head=${env.BRANCH_NAME}）";; *) echo "❌ GitHub 远程合并失败 HTTP \$code（409=冲突，需人工处理）"; exit 1;; esac
+                        """
                     }
                 }
             }
@@ -303,7 +335,8 @@ pipeline {
         }
         cleanup {
             echo "--- 清理工作区 ---"
-            cleanWs()
+            // 用 shell 快删替代 cleanWs()（避免 ws-cleanup 异步残留堆积，见 docs/ops/Jenkins-workspace-膨胀治理-操作手册.md）
+            sh 'rm -rf -- * .[^.]* || true'
         }
     }
 }
