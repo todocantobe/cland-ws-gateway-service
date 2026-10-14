@@ -156,7 +156,7 @@ pipeline {
         // Stage: Build & Push Docker Image (Native mode)
         // ----------------------------------------------------
         stage('Build & Push Image') {
-            when { expression { return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /^master$|^main$/ } }
+            when { expression { return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ || env.BRANCH_NAME =~ /^master$|^main$/ } }
             steps {
                 script {
                     def gitCommit = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
@@ -200,7 +200,7 @@ pipeline {
         // Stage: Deploy to target server
         // ----------------------------------------------------
         stage('Deploy') {
-            when { expression { return params.RUN_DEPLOY == true && (env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /^master$|^main$/) } }
+            when { expression { return params.RUN_DEPLOY == true && (env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ || env.BRANCH_NAME =~ /^master$|^main$/) } }
             steps {
                 script {
                     def targetIp = (params.DEPLOY_ENV == 'prod') ? params.PROD_SERVER_IP : params.DEV_SERVER_IP
@@ -245,7 +245,7 @@ pipeline {
         // Stage: Post-Deploy Self-Check (G5 · #398)
         // ----------------------------------------------------
         stage('Post-Deploy Self-Check (G5 · #398)') {
-            when { expression { return params.RUN_DEPLOY == true && (env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /^master$|^main$/) } }
+            when { expression { return params.RUN_DEPLOY == true && (env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ || env.BRANCH_NAME =~ /^master$|^main$/) } }
             steps {
                 script {
                     def scTargetIp = (params.DEPLOY_ENV == 'prod') ? params.PROD_SERVER_IP : params.DEV_SERVER_IP
@@ -265,7 +265,7 @@ pipeline {
         // ----------------------------------------------------
         stage('Merge Back to Master & Tag & Cleanup') {
             when {
-                expression { return env.BRANCH_NAME =~ /release\/.*/ }
+                expression { return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ }
             }
             steps {
                 sshagent (credentials: ["${GIT_CREDENTIAL_ID}"]) {

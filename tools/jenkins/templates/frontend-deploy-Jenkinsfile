@@ -303,7 +303,7 @@ REMOTE
         }
         stage('Merge Back to Master') {
             when {
-                expression { return env.BRANCH_NAME =~ /release\/.*/ }
+                expression { return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ }
             }
             steps {
                 sshagent(credentials: ["${GIT_CREDENTIAL_ID}"]) {

@@ -31,7 +31,7 @@ pipeline {
         string(name: 'NACOS_DATAID', defaultValue: 'cland-ws-gateway-service', description: 'Nacos 配置 Data ID')
         string(name: 'NACOS_GROUP', defaultValue: 'DEFAULT_GROUP', description: 'Nacos 配置 Group')
         string(name: 'NACOS_USERNAME', defaultValue: 'base', description: 'Nacos 用户名')
-        string(name: 'NACOS_PASSWORD', defaultValue: 'base123', description: 'Nacos 密码')
+        string(name: 'NACOS_CREDENTIAL_ID', defaultValue: 'nacos-base-creds', description: 'Nacos 密码凭据 ID (usernamePassword；密码不落明文)')
 
         // --- 凭证 ID 配置 ---
         string(name: 'GIT_CREDENTIAL_ID', defaultValue: 'jenkins_github', description: 'Git 仓库访问凭证 ID')
@@ -81,6 +81,7 @@ pipeline {
             steps {
                 sshagent(credentials: ["${GIT_CREDENTIAL_ID}"]) {
                     script {
+                        try {
                         echo '--- 1. 质量门禁: 统一入口 scripts/check.sh (Jenkins/本地同源, #397) ---'
                         sh '''
                             if [ -f scripts/check.sh ]; then
@@ -95,6 +96,10 @@ pipeline {
                         echo '--- 2. 构建二进制 (CGO, 产物 build/app) ---'
                         // -buildvcs=false: 容器内 git ownership 导致 VCS stamping exit 128
                         sh 'mkdir -p build && go build -buildvcs=false -o build/app .'
+                        } finally {
+                            // 容器以 root 运行 → 产物 root 属主；交还 workspace 属主，保证 post rm 可删
+                            sh 'own=$(stat -c %u:%g . 2>/dev/null || echo 0:0); chown -R "$own" . 2>/dev/null || true'
+                        }
                     }
                 }
             }
@@ -103,7 +108,7 @@ pipeline {
         stage('Build & Push Docker Image') {
             when {
                 expression {
-                    return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /master|main/
+                    return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ || env.BRANCH_NAME =~ /master|main/
                 }
             }
             steps {
@@ -193,12 +198,13 @@ pipeline {
                             -e NACOS_DATAID="${params.NACOS_DATAID}" \\
                             -e NACOS_GROUP="${params.NACOS_GROUP}" \\
                             -e NACOS_USERNAME="${params.NACOS_USERNAME}" \\
-                            -e NACOS_PASSWORD="${params.NACOS_PASSWORD}" \\
+                            -e NACOS_PASSWORD="\$NACOS_CRED_PASS" \\
                             ${latestImageName}
 
                         docker ps -f name=${APP_NAME}
                     """
 
+                    withCredentials([usernamePassword(credentialsId: params.NACOS_CREDENTIAL_ID, usernameVariable: 'NACOS_CRED_BIND_USER', passwordVariable: 'NACOS_CRED_PASS')]) {
                     withCredentials([usernamePassword(credentialsId: env.DOCKER_CREDENTIAL_ID, usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
                         def loginCmd = "docker login ${DOCKER_REGISTRY} -u \$DOCKER_USER -p \$DOCKER_PASS"
                         if (targetIp == '127.0.0.1' || targetIp == 'localhost') {
@@ -227,6 +233,7 @@ pipeline {
                     if (!healthy) {
                         error "❌ 部署后健康检查失败: ${healthUrl}（容器未起 / 端口不通 / 镜像拉取失败）"
                     }
+                    }
                     echo "✅ Deployment successful!（健康检查通过: ${healthUrl}）"
                 }
             }
@@ -253,7 +260,7 @@ pipeline {
 
         stage('Merge Back to Master') {
             when {
-                expression { return env.BRANCH_NAME =~ /release\/.*/ }
+                expression { return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ }
             }
             steps {
                 sshagent(credentials: ["${GIT_CREDENTIAL_ID}"]) {
@@ -275,7 +282,8 @@ pipeline {
 
     post {
         always {
-            cleanWs()
+            // 用 shell 快删替代 cleanWs()（避免 ws-cleanup 异步残留堆积，见 docs/ops/Jenkins-workspace-膨胀治理-操作手册.md）
+            sh 'rm -rf -- * .[^.]* || true'
             sh "docker image prune -f || true"
         }
         success { echo "Pipeline finished successfully." }
