@@ -4,6 +4,7 @@ pipeline {
     // --- 参数化构建配置 (占位值由 generate-jenkinsfile.py 替换) ---
     parameters {
         choice(name: 'DEPLOY_ENV', choices: ['dev', 'prod', 'test'], description: '选择要部署的目标环境')
+        booleanParam(name: 'RUN_DEPLOY', defaultValue: false, description: '显式请求部署（默认 false：仅构建产镜像，不部署）')
 
         // --- 服务器配置 (生产建议在 Jenkins Job 参数默认值中维护) ---
         string(name: 'DEV_SERVER_IP', defaultValue: '192.168.1.5', description: 'Dev 环境服务器 IP')
@@ -30,7 +31,7 @@ pipeline {
         string(name: 'NACOS_DATAID', defaultValue: 'cland-ws-gateway-service', description: 'Nacos 配置 Data ID')
         string(name: 'NACOS_GROUP', defaultValue: 'DEFAULT_GROUP', description: 'Nacos 配置 Group')
         string(name: 'NACOS_USERNAME', defaultValue: 'base', description: 'Nacos 用户名')
-        string(name: 'NACOS_PASSWORD', defaultValue: 'base123', description: 'Nacos 密码')
+        string(name: 'NACOS_CREDENTIAL_ID', defaultValue: 'nacos-base-creds', description: 'Nacos 密码凭据 ID (usernamePassword；密码不落明文)')
 
         // --- 凭证 ID 配置 ---
         string(name: 'GIT_CREDENTIAL_ID', defaultValue: 'chaineasy', description: 'Git 仓库访问凭证 ID')
@@ -50,7 +51,12 @@ pipeline {
             steps {
                 checkout scm
                 script {
-                    if (env.BRANCH_NAME == null || env.BRANCH_NAME == '') {
+                    // 发布分支固定值（可选）：配置了 release_branch 则覆盖 SCM 选出的分支；否则用 Jenkins 原生 pick
+                    def fixedRb = "".trim()
+                    if (fixedRb) {
+                        sh "git fetch -q origin ${fixedRb} && git checkout -f ${fixedRb}"
+                        env.BRANCH_NAME = fixedRb
+                    } else if (env.BRANCH_NAME == null || env.BRANCH_NAME == '') {
                         if (env.GIT_BRANCH != null) {
                             env.BRANCH_NAME = env.GIT_BRANCH.replace('origin/', '')
                         } else {
@@ -75,13 +81,25 @@ pipeline {
             steps {
                 sshagent(credentials: ["${GIT_CREDENTIAL_ID}"]) {
                     script {
-                        echo '--- 1. 质量门禁: go vet + go test ---'
-                        sh 'go vet ./...'
-                        sh 'go test ./...'
+                        try {
+                        echo '--- 1. 质量门禁: 统一入口 scripts/check.sh (Jenkins/本地同源, #397) ---'
+                        sh '''
+                            if [ -f scripts/check.sh ]; then
+                                bash scripts/check.sh --stage all
+                            else
+                                echo "⚠️ 无 scripts/check.sh，回退内置门禁（请由 harbor 模板补齐统一入口, #397）"
+                                go vet ./...
+                                go test ./...
+                            fi
+                        '''
 
                         echo '--- 2. 构建二进制 (CGO, 产物 build/app) ---'
                         // -buildvcs=false: 容器内 git ownership 导致 VCS stamping exit 128
                         sh 'mkdir -p build && go build -buildvcs=false -o build/app .'
+                        } finally {
+                            // 容器以 root 运行 → 产物 root 属主；交还 workspace 属主，保证 post rm 可删
+                            sh 'own=$(stat -c %u:%g . 2>/dev/null || echo 0:0); chown -R "$own" . 2>/dev/null || true'
+                        }
                     }
                 }
             }
@@ -90,7 +108,7 @@ pipeline {
         stage('Build & Push Docker Image') {
             when {
                 expression {
-                    return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/
+                    return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ || env.BRANCH_NAME =~ /master|main/
                 }
             }
             steps {
@@ -111,10 +129,28 @@ pipeline {
             }
         }
 
+        stage('Deploy Gates (G0–G3 · #398)') {
+            when {
+                expression { return params.RUN_DEPLOY == true }
+            }
+            steps {
+                script {
+                    sh '''
+                        if [ -f scripts/deploy-gate.sh ]; then
+                            echo "--- 部署门禁 G0-G3 (env=${DEPLOY_ENV}, branch=${BRANCH_NAME}) ---"
+                            bash scripts/deploy-gate.sh --env "${DEPLOY_ENV}" --branch "${BRANCH_NAME}" --run-deploy "${RUN_DEPLOY}"
+                        else
+                            echo "❌ 缺部署门禁脚本 scripts/deploy-gate.sh（#398，install-jenkinsfile-gate.sh 安装）"; exit 1
+                        fi
+                    '''
+                }
+            }
+        }
+
         stage('Deploy Service') {
             when {
                 expression {
-                    return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/
+                    return params.RUN_DEPLOY == true && (env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ || env.BRANCH_NAME =~ /master|main/)
                 }
             }
             steps {
@@ -162,12 +198,13 @@ pipeline {
                             -e NACOS_DATAID="${params.NACOS_DATAID}" \\
                             -e NACOS_GROUP="${params.NACOS_GROUP}" \\
                             -e NACOS_USERNAME="${params.NACOS_USERNAME}" \\
-                            -e NACOS_PASSWORD="${params.NACOS_PASSWORD}" \\
+                            -e NACOS_PASSWORD="\$NACOS_CRED_PASS" \\
                             ${latestImageName}
 
                         docker ps -f name=${APP_NAME}
                     """
 
+                    withCredentials([usernamePassword(credentialsId: params.NACOS_CREDENTIAL_ID, usernameVariable: 'NACOS_CRED_BIND_USER', passwordVariable: 'NACOS_CRED_PASS')]) {
                     withCredentials([usernamePassword(credentialsId: env.DOCKER_CREDENTIAL_ID, usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
                         def loginCmd = "docker login ${DOCKER_REGISTRY} -u \$DOCKER_USER -p \$DOCKER_PASS"
                         if (targetIp == '127.0.0.1' || targetIp == 'localhost') {
@@ -196,7 +233,27 @@ pipeline {
                     if (!healthy) {
                         error "❌ 部署后健康检查失败: ${healthUrl}（容器未起 / 端口不通 / 镜像拉取失败）"
                     }
+                    }
                     echo "✅ Deployment successful!（健康检查通过: ${healthUrl}）"
+                }
+            }
+        }
+
+        stage('Post-Deploy Self-Check (G5 · #398)') {
+            when {
+                expression { return params.RUN_DEPLOY == true && (env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ || env.BRANCH_NAME =~ /master|main/) }
+            }
+            steps {
+                script {
+                    def scServerConfig = ['dev': params.DEV_SERVER_IP, 'prod': params.PROD_SERVER_IP, 'test': params.DEV_SERVER_IP]
+                    def scTargetIp = scServerConfig[params.DEPLOY_ENV]
+                    sh """
+                        if [ -f scripts/selfcheck.sh ]; then
+                            bash scripts/selfcheck.sh --base http://${scTargetIp}:${params.EXPOSE_APP_PORT} --health-path ${params.HEALTH_PATH}
+                        else
+                            echo "❌ 缺部署后自证脚本 scripts/selfcheck.sh（#398）"; exit 1
+                        fi
+                    """
                 }
             }
         }
@@ -225,7 +282,8 @@ pipeline {
 
     post {
         always {
-            cleanWs()
+            // 用 shell 快删替代 cleanWs()（避免 ws-cleanup 异步残留堆积，见 docs/ops/Jenkins-workspace-膨胀治理-操作手册.md）
+            sh 'rm -rf -- * .[^.]* || true'
             sh "docker image prune -f || true"
         }
         success { echo "Pipeline finished successfully." }

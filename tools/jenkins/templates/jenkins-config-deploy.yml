@@ -1,0 +1,31 @@
+# ===================================================================
+# jenkins-config-deploy.yml — 前端 SPA + SSH 部署到服务器
+# 用法: bash /home/alice/.agents/skills/jenkins/scripts/generate-jenkinsfile.sh -y ./jenkins-config-deploy.yml
+# 生成器支持的键见 SKILL.md §17.4；未配置的回退 .env/内置默认。
+# ===================================================================
+
+# 项目类型: frontend | frontend-yarn | frontend-docker | frontend-deploy | java | python
+type: frontend-deploy
+
+# 输出文件路径（默认 ./Jenkinsfile）
+output: ./Jenkinsfile
+
+# 构建环境: dev | test | prod（作为 DEPLOY_ENV 默认项放首位）
+env: prod
+
+# --- 前端 (npm) ---
+node_version: "22"                                   # Node 版本 (nvm 安装/切换)
+git_credential_id: github-hack0303                   # Git 仓库访问凭证 ID
+npm_registry: https://registry.npmmirror.com         # npm 镜像源
+node_options: "--max-old-space-size=4096"            # NODE_OPTIONS
+test_command: "npm test"                             # 质量门禁命令 (默认 npm test; 无 test 脚本的项目可改 npm run typecheck 等)
+test_stage_name: "Unit Test"                         # 质量门禁阶段名 (默认 Unit Test)
+build_output_dir: "dist"                             # 构建产物输出目录 (默认 dist; Next.js 项目为 .next)
+
+# --- SSH 部署参数（frontend-deploy 专属；服务器信息由 Jenkins Job 参数默认值维护） ---
+deploy_host: server.example.com                      # 服务器主机地址（IP 或域名）
+deploy_port: "22"                                    # SSH 端口
+deploy_user: root                                    # SSH 登录用户（云厂商密钥对通常绑定 root）
+deploy_owner: deployuser                             # 站点属主（chown 目标，如 deployuser:deployuser）
+deploy_domain: www.example.com                       # 部署域名，解压目标 /var/www/<domain>/
+deploy_credential_id: deploy-key                     # SSH 私钥凭证 ID（Jenkins 凭据管理）

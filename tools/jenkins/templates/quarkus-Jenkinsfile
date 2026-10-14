@@ -1,0 +1,311 @@
+/**
+ * Jenkins Pipeline for {{APP_NAME}} (Quarkus + Maven)
+ *
+ * Pipeline stages:
+ *   Checkout → Quality Checks (SpotBugs, Format, Tests) → Build & Push Docker Image → Deploy → Merge Back & Tag & Cleanup
+ *
+ * Branches:
+ *   - master/main:         Build + Push + Deploy
+ *   - release/*:           Build + Push + Deploy → Merge to master → Tag → Delete release branch
+ *   - other:               Build only (quality checks, no push/deploy)
+ *
+ * ╔══════════════════════════════════════════════════════════════════════════╗
+ * ║  GENERATED FILE — DO NOT EDIT DIRECTLY                                 ║
+ * ║  Edit jenkins-config.yml, then run (jenkins 技能生成器):              ║
+ * ║  python3 ~/.agents/skills/jenkins/scripts/generate-jenkinsfile.py -y jenkins-config.yml ║
+ * ╚══════════════════════════════════════════════════════════════════════════╝
+ */
+
+// =============================================
+//  Quality checks reusable function (Maven-based)
+// =============================================
+def runJavaQualityChecks(skipChecks = false) {
+    def nativeBuild = (env.NATIVE_BUILD == 'true')
+    def pkgGoal = nativeBuild ? 'package -Dnative -DskipTests' : 'package -DskipTests'
+    echo "--- 开始 Java 质量检查 (Maven, github-packages; native=${nativeBuild}) ---"
+    sh """
+        MVN_SETTINGS="-s ci/maven-settings.xml"
+        if [ "${skipChecks}" = "true" ]; then
+            echo ">> [SKIP] Quality checks disabled, resolving dependencies ..."
+            ./mvnw dependency:resolve -q \$MVN_SETTINGS
+            echo ">> [Package] ${pkgGoal} ..."
+            ./mvnw ${pkgGoal} -q \$MVN_SETTINGS
+            exit 0
+        fi
+
+        echo ">> [Step 1/5] Code Format (spotless/fmt 自动识别) ..."
+        if grep -q "spotless-maven-plugin" pom.xml 2>/dev/null; then FMT_GOAL="spotless:check"; else FMT_GOAL="fmt:check"; fi
+        echo "   使用 \$FMT_GOAL"
+        ./mvnw compile "\$FMT_GOAL" -q \$MVN_SETTINGS || {
+            echo "[WARN] Format check failed. Run locally to fix (spotless:apply 或 fmt:format)."
+            exit 1
+        }
+
+        echo ">> [Step 2/5] Static Analysis (SpotBugs + FindSecBugs) ..."
+        ./mvnw verify spotbugs:check -Dspotbugs.skip=false -q \$MVN_SETTINGS
+
+        echo ">> [Step 3/5] Unit Tests ..."
+        ./mvnw test -q \$MVN_SETTINGS
+
+        echo ">> [Step 4/5] Integration Tests (skip by default, run with -DskipITs=false) ..."
+        # ./mvnw verify -DskipITs=false -q \$MVN_SETTINGS
+
+        echo ">> [Step 5/5] Package (${pkgGoal}) ..."
+        ./mvnw ${pkgGoal} -q \$MVN_SETTINGS
+    """
+}
+
+// =============================================
+//  容器内以 root 运行时：把工作区属主交还给 workspace 目录拥有者
+//  否则产物为 root 属主，post 的 rm 删不掉 → workspace 残留堆积
+// =============================================
+def restoreWorkspaceOwnership() {
+    sh 'own=$(stat -c %u:%g . 2>/dev/null || echo 0:0); chown -R "$own" . 2>/dev/null || true'
+}
+
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'DEPLOY_ENV', choices: ['dev', 'prod', 'local'], description: '部署目标环境')
+        string(name: 'MAVEN_VERSION', defaultValue: '{{MAVEN_VERSION}}', description: 'Maven 版本 (用于 .mvn/wrapper 回退)')
+        string(name: 'JAVA_VERSION', defaultValue: '{{JAVA_VERSION}}', description: 'Java 版本 (与 pom.xml 保持一致)')
+        string(name: 'APP_NAME', defaultValue: '{{APP_NAME}}', description: '服务名称 (与 artifactId 一致)')
+        string(name: 'DOCKER_REGISTRY', defaultValue: '{{DOCKER_REGISTRY}}', description: '上传仓库')
+        string(name: 'DOCKER_REGISTRY_CACHE', defaultValue: '{{DOCKER_REGISTRY_CACHE}}', description: '拉取仓库')
+
+        booleanParam(name: 'SKIP_QUALITY_CHECKS', defaultValue: false, description: '跳过格式检查/静态分析/单元测试，仅验证依赖解析 + 打包')
+        booleanParam(name: 'NATIVE_BUILD', defaultValue: false, description: '是否构建 GraalVM native 镜像（默认 false=JVM 轻量：快、不拖垮构建机；native 建议独立/大内存流水线）')
+        booleanParam(name: 'RUN_DEPLOY', defaultValue: false, description: '显式请求部署（默认 false：仅构建产镜像，不部署）')
+        string(name: 'HEALTH_PATH', defaultValue: '/health', description: '部署后健康检查路径')
+
+        // GitHub Packages仓库认证
+        string(name: 'GITHUB_TOKEN_CREDENTIAL_ID', defaultValue: '{{GITHUB_TOKEN_CREDENTIAL_ID}}', description: 'Jenkins credential ID for GitHub Personal Access Token (secret text)')
+
+        // Nacos 启用开关（构建时禁用，避免 build-time 连接）
+        booleanParam(name: 'NACOS_ENABLED', defaultValue: false, description: '构建时禁用 Nacos（设为 true 则连接 Nacos 获取远程配置）')
+
+        // 服务器 & Nacos 配置
+        string(name: 'DEV_SERVER_IP',  defaultValue: '{{DEV_SERVER_IP}}')
+        string(name: 'PROD_SERVER_IP', defaultValue: '{{PROD_SERVER_IP}}')
+        string(name: 'SSH_USER',       defaultValue: '{{SSH_USER}}')
+        string(name: 'EXPOSE_APP_PORT', defaultValue: '{{EXPOSE_APP_PORT}}')
+        string(name: 'APP_PORT',       defaultValue: '{{APP_PORT}}')
+        string(name: 'NACOS_SERVERADDR', defaultValue: '{{NACOS_SERVERADDR}}')
+        string(name: 'NACOS_NAMESPACE',  defaultValue: '{{NACOS_NAMESPACE}}')
+        string(name: 'NACOS_DATAID',     defaultValue: '{{APP_NAME}}')
+        string(name: 'NACOS_GROUP',      defaultValue: '{{NACOS_GROUP}}')
+        string(name: 'NACOS_USERNAME',   defaultValue: '{{NACOS_USERNAME}}')
+        string(name: 'NACOS_CREDENTIAL_ID', defaultValue: '{{NACOS_CREDENTIAL_ID}}', description: 'Nacos 密码凭据 ID (密码不落明文)')
+
+        // Jenkins credential IDs
+        string(name: 'GIT_CREDENTIAL_ID',   defaultValue: '{{GIT_CREDENTIAL_ID}}')
+        string(name: 'DOCKER_CREDENTIAL_ID', defaultValue: '{{DOCKER_CREDENTIAL_ID}}')
+        string(name: 'DEPLOY_SSH_CRED_ID',   defaultValue: '{{DEPLOY_SSH_CRED_ID}}')
+    }
+
+    environment {
+        // Maven 优化
+        MAVEN_OPTS = "-Xmx2048m -XX:MaxMetaspaceSize=512m"
+        // 构建时禁用 Nacos，避免 native 编译期间连接 Nacos
+        NACOS_ENABLED = "${params.NACOS_ENABLED}"
+        // native 开关（false=JVM 轻量模式）
+        NATIVE_BUILD = "${params.NATIVE_BUILD}"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.BRANCH_NAME = env.GIT_BRANCH ? env.GIT_BRANCH.replace('origin/', '') : 'master'
+                    echo "当前分支: ${env.BRANCH_NAME}"
+                }
+            }
+        }
+
+        // ----------------------------------------------------
+        // Stage: Java Quality & Build (using Maven wrapper)
+        // ----------------------------------------------------
+        stage('Java Quality & Build') {
+            agent {
+                docker {
+                    // 使用 Quarkus Mandrel 构建镜像（内置 JDK 25 + native-image + Maven）
+                    // 无需 Docker socket / container-build，native-image 直接可用
+                    image "${params.DOCKER_REGISTRY_CACHE}/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25"
+                    registryUrl "http://${params.DOCKER_REGISTRY_CACHE}"
+                    args '-u 0:0 --entrypoint="" -v /var/lib/jenkins/m2_cache:/root/.m2'
+                    reuseNode true
+                }
+            }
+            steps {
+                withCredentials([string(credentialsId: params.GITHUB_TOKEN_CREDENTIAL_ID, variable: 'GITHUB_PAT')]) {
+                    script {
+                        try {
+                            runJavaQualityChecks(params.SKIP_QUALITY_CHECKS)
+                        } finally {
+                            // 容器以 root 运行 → 产物 root 属主；交还 workspace 属主，保证 post rm 可删
+                            restoreWorkspaceOwnership()
+                        }
+                    }
+                }
+            }
+        }
+
+        // ----------------------------------------------------
+        // Stage: Build & Push Docker Image (Native mode)
+        // ----------------------------------------------------
+        stage('Build & Push Image') {
+            when { expression { return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ || env.BRANCH_NAME =~ /^master$|^main$/ } }
+            steps {
+                script {
+                    def gitCommit = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+                    def imageTag = "${env.BUILD_NUMBER}-${gitCommit}"
+                    def fullImage = "${params.DOCKER_REGISTRY}/${params.APP_NAME}:${imageTag}"
+                    def latestImage = "${params.DOCKER_REGISTRY}/${params.APP_NAME}:latest"
+                    // native 构建用 native-micro，否则用 JVM 镜像
+                    def dockerfile = (env.NATIVE_BUILD == 'true') ? 'src/main/docker/Dockerfile.native-micro' : 'src/main/docker/Dockerfile.jvm'
+
+                    docker.withRegistry("http://${params.DOCKER_REGISTRY}", params.DOCKER_CREDENTIAL_ID) {
+                        // 按 native/JVM 模式选择 Dockerfile
+                        def app = docker.build(fullImage, "--no-cache -f ${dockerfile} .")
+                        app.push()
+                        sh "docker tag ${fullImage} ${latestImage}"
+                        sh "docker push ${latestImage}"
+                    }
+                }
+            }
+        }
+
+        // ----------------------------------------------------
+        // Stage: Deploy Gates (G0–G3 · #398)
+        // ----------------------------------------------------
+        stage('Deploy Gates (G0–G3 · #398)') {
+            when { expression { return params.RUN_DEPLOY == true } }
+            steps {
+                script {
+                    sh '''
+                        if [ -f scripts/deploy-gate.sh ]; then
+                            echo "--- 部署门禁 G0-G3 (env=${DEPLOY_ENV}, branch=${BRANCH_NAME}) ---"
+                            bash scripts/deploy-gate.sh --env "${DEPLOY_ENV}" --branch "${BRANCH_NAME}" --run-deploy "${RUN_DEPLOY}"
+                        else
+                            echo "❌ 缺部署门禁脚本 scripts/deploy-gate.sh（#398，install-jenkinsfile-gate.sh 安装）"; exit 1
+                        fi
+                    '''
+                }
+            }
+        }
+
+        // ----------------------------------------------------
+        // Stage: Deploy to target server
+        // ----------------------------------------------------
+        stage('Deploy') {
+            when { expression { return params.RUN_DEPLOY == true && (env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ || env.BRANCH_NAME =~ /^master$|^main$/) } }
+            steps {
+                script {
+                    def targetIp = (params.DEPLOY_ENV == 'prod') ? params.PROD_SERVER_IP : params.DEV_SERVER_IP
+                    def latestImage = "${params.DOCKER_REGISTRY}/${params.APP_NAME}:latest"
+                    def baseDir = "/opt/${params.APP_NAME}"
+
+                    def deployScript = """
+                        set -e
+                        sudo mkdir -p ${baseDir}/logs ${baseDir}/data
+                        sudo chmod -R 777 ${baseDir}
+                        docker pull ${latestImage}
+                        docker stop ${params.APP_NAME} || true
+                        docker rm ${params.APP_NAME} || true
+                        docker run -d --restart=always --name ${params.APP_NAME} \\
+                            -p ${params.EXPOSE_APP_PORT}:${params.APP_PORT} \\
+                            -v ${baseDir}/logs:/opt/${params.APP_NAME}/logs \\
+                            -v ${baseDir}/data:/opt/${params.APP_NAME}/data \\
+                            -e NACOS_SERVERADDR="${params.NACOS_SERVERADDR}" \\
+                            -e NACOS_NAMESPACE="${params.NACOS_NAMESPACE}" \\
+                            -e NACOS_DATAID="${params.NACOS_DATAID}" \\
+                            -e NACOS_GROUP="${params.NACOS_GROUP}" \\
+                            -e NACOS_USERNAME="${params.NACOS_USERNAME}" \\
+                            -e NACOS_PASSWORD="\$NACOS_CRED_PASS" \\
+                            -e NACOS_ENABLED="true" \\
+                            -e QUARKUS_PROFILE="${params.DEPLOY_ENV}" \\
+                            ${latestImage}
+                    """
+
+                    withCredentials([usernamePassword(credentialsId: params.NACOS_CREDENTIAL_ID, usernameVariable: 'NACOS_CRED_BIND_USER', passwordVariable: 'NACOS_CRED_PASS')]) {
+                    withCredentials([usernamePassword(credentialsId: params.DOCKER_CREDENTIAL_ID, usernameVariable: 'U', passwordVariable: 'P')]) {
+                        def login = "docker login ${params.DOCKER_REGISTRY} -u ${U} -p ${P}"
+                        withCredentials([sshUserPrivateKey(credentialsId: params.DEPLOY_SSH_CRED_ID, keyFileVariable: 'KEY')]) {
+                            sh "ssh -o StrictHostKeyChecking=no -i ${KEY} ${params.SSH_USER}@${targetIp} \"${login} && ${deployScript}\""
+                        }
+                    }
+                    }
+                }
+            }
+        }
+
+        // ----------------------------------------------------
+        // Stage: Post-Deploy Self-Check (G5 · #398)
+        // ----------------------------------------------------
+        stage('Post-Deploy Self-Check (G5 · #398)') {
+            when { expression { return params.RUN_DEPLOY == true && (env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ || env.BRANCH_NAME =~ /^master$|^main$/) } }
+            steps {
+                script {
+                    def scTargetIp = (params.DEPLOY_ENV == 'prod') ? params.PROD_SERVER_IP : params.DEV_SERVER_IP
+                    sh """
+                        if [ -f scripts/selfcheck.sh ]; then
+                            bash scripts/selfcheck.sh --base http://${scTargetIp}:${params.EXPOSE_APP_PORT} --health-path ${params.HEALTH_PATH}@@G5_EXTRA@@
+                        else
+                            echo "❌ 缺部署后自证脚本 scripts/selfcheck.sh（#398）"; exit 1
+                        fi
+                    """
+                }
+            }
+        }
+
+        // ----------------------------------------------------
+        // Stage: Merge Back to Master & Tag & Cleanup
+        // ----------------------------------------------------
+        stage('Merge Back to Master & Tag & Cleanup') {
+            when {
+                expression { return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ }
+            }
+            steps {
+                sshagent (credentials: ["${GIT_CREDENTIAL_ID}"]) {
+                    script {
+                        echo "Merging ${env.BRANCH_NAME} into master..."
+
+                        sh 'git config core.sshCommand "ssh -o StrictHostKeyChecking=no"'
+                        sh 'git config user.email "jenkins@example.com"'
+                        sh 'git config user.name "Jenkins CI"'
+
+                        // 1. 同步最新 master
+                        sh 'git fetch origin master'
+                        sh 'git checkout master'
+                        sh 'git pull origin master'
+
+                        // 2. 合并 release 到 master
+                        sh "git merge --no-ff origin/${env.BRANCH_NAME} -m 'Merge release ${env.BRANCH_NAME} to master [Jenkins Build #${env.BUILD_NUMBER}]'"
+                        sh 'git push origin master'
+
+                        // 3. 自动打 TAG（使用 release 分支名作为版本号）
+                        def tagName = "${env.BRANCH_NAME}"
+                        echo "Creating and pushing tag: ${tagName}"
+                        sh "git tag -a ${tagName} -m 'Release ${tagName} (Jenkins #${env.BUILD_NUMBER})'"
+                        sh "git push origin ${tagName}"
+
+                        // 4. 自动删除远程 release 分支
+                        echo "Deleting remote release branch: ${env.BRANCH_NAME}"
+                        sh "git push origin :refs/heads/${env.BRANCH_NAME}"
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            // 用 shell 快删替代 cleanWs()（避免 ws-cleanup 异步残留堆积，见 docs/ops/Jenkins-workspace-膨胀治理-操作手册.md）
+            sh 'rm -rf -- * .[^.]* || true'
+            // 清理悬空镜像
+            sh "docker image prune -f || true"
+        }
+    }
+}

@@ -1,0 +1,20 @@
+# ===================================================================
+# jenkins-config.yml — 前端 SPA (npm) 项目配置示例
+# 用法: bash scripts/generate-jenkinsfile.sh -y ./jenkins-config.yml
+# 优先级: 命令行参数 > 本文件 > .env > 内置默认
+# ===================================================================
+
+# 项目类型: frontend | frontend-yarn | frontend-docker | java | python
+type: frontend
+
+# 输出文件路径（默认 ./Jenkinsfile）
+output: ./Jenkinsfile
+
+# 构建环境: dev | test | prod（作为 DEPLOY_ENV 默认项放首位）
+env: prod
+
+# --- 前端 (npm) ---
+node_version: "22"                                   # Node 版本 (nvm 安装/切换)
+git_credential_id: cland-wd-dao-game                 # Jenkins 凭据 ID
+npm_registry: https://registry.npmmirror.com         # npm 镜像源（覆盖模板默认）
+node_options: "--max-old-space-size=4096"            # NODE_OPTIONS（覆盖模板默认）
