@@ -175,7 +175,7 @@ pipeline {
                     // #540 digest 钉住（含回滚覆盖）：部署 image@sha256，弃 :latest
                     def imageDigest = (params.IMAGE_DIGEST_OVERRIDE?.trim()) ?: (env.IMAGE_DIGEST ?: readFile('.image-digest').trim())
                     if (!(imageDigest ==~ /sha256:[0-9a-f]{64}/)) { error "❌ digest 非法（得到: '${imageDigest}'）——#540" }
-                    def latestImageName = "${DOCKER_REGISTRY}/${APP_NAME}@${imageDigest}"
+                    def pinnedImageName = "${DOCKER_REGISTRY}/${APP_NAME}@${imageDigest}"
 
                     def baseDir = "/opt/${APP_NAME}"
                     def logDir = "${baseDir}/logs"
@@ -188,7 +188,7 @@ pipeline {
                         sudo mkdir -p ${logDir} ${dataDir}
                         sudo chmod -R 777 ${logDir} ${dataDir}
 
-                        docker pull ${latestImageName}
+                        docker pull ${pinnedImageName}
 
                         # 幂等替换旧容器：直接 rm -f（stop+rm 在 restarting 异常态会失败）
                         docker rm -f ${APP_NAME} >/dev/null 2>&1 || true
@@ -207,7 +207,7 @@ pipeline {
                             -e NACOS_GROUP="${params.NACOS_GROUP}" \\
                             -e NACOS_USERNAME="${params.NACOS_USERNAME}" \\
                             -e NACOS_PASSWORD="\$NACOS_CRED_PASS" \\
-                            ${latestImageName}
+                            ${pinnedImageName}
 
                         docker ps -f name=${APP_NAME}
                     """

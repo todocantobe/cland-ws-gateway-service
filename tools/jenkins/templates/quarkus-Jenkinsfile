@@ -212,14 +212,14 @@ pipeline {
                     // #540 digest 钉住（含回滚覆盖）：部署 image@sha256，弃 :latest
                     def imageDigest = (params.IMAGE_DIGEST_OVERRIDE?.trim()) ?: (env.IMAGE_DIGEST ?: readFile('.image-digest').trim())
                     if (!(imageDigest ==~ /sha256:[0-9a-f]{64}/)) { error "❌ digest 非法（得到: '${imageDigest}'）——#540" }
-                    def latestImage = "${params.DOCKER_REGISTRY}/${params.APP_NAME}@${imageDigest}"
+                    def pinnedImage = "${params.DOCKER_REGISTRY}/${params.APP_NAME}@${imageDigest}"
                     def baseDir = "/opt/${params.APP_NAME}"
 
                     def deployScript = """
                         set -e
                         sudo mkdir -p ${baseDir}/logs ${baseDir}/data
                         sudo chmod -R 777 ${baseDir}
-                        docker pull ${latestImage}
+                        docker pull ${pinnedImage}
                         docker stop ${params.APP_NAME} || true
                         docker rm ${params.APP_NAME} || true
                         docker run -d --restart=always --name ${params.APP_NAME} \\
@@ -234,7 +234,7 @@ pipeline {
                             -e NACOS_PASSWORD="\$NACOS_CRED_PASS" \\
                             -e NACOS_ENABLED="true" \\
                             -e QUARKUS_PROFILE="${params.DEPLOY_ENV}" \\
-                            ${latestImage}
+                            ${pinnedImage}
                     """
 
                     withCredentials([usernamePassword(credentialsId: params.NACOS_CREDENTIAL_ID, usernameVariable: 'NACOS_CRED_BIND_USER', passwordVariable: 'NACOS_CRED_PASS')]) {
