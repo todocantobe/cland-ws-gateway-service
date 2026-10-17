@@ -112,6 +112,8 @@ DEFAULTS = {
     "e2e_cmd": "",
     # Merge Back 目标分支（各仓 trunk 可能 main/master）
     "merge_branch": "master",
+    # Merge Back 后回灌目标（#576：不靠人记得，自动 master ⊆ develop；空=关闭）
+    "backfill_branch": "develop",
     # 发布分支固定值（留空=自动取最新 release/*）
     "release_branch": "",
     "build_json": False,
@@ -318,9 +320,11 @@ def gen_frontend_ssr(cfg) -> str:
         "NODE_ENV=production": groovy_single_quote(cfg["app_env_vars"]),
         "@@G5_EXTRA@@": g5_extra(cfg),
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@BACKFILL_BRANCH@@": cfg["backfill_branch"],
         "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@BACKFILL_BRANCH@@": cfg["backfill_branch"],
         "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
         "string(name: 'HEALTH_PATH', defaultValue: '/health'": f"string(name: 'HEALTH_PATH', defaultValue: '{cfg.get('health_path') or '/health'}'",
@@ -368,9 +372,11 @@ def gen_frontend_deploy(cfg) -> str:
         "{{BUILD_OUTPUT_DIR}}": cfg["build_output_dir"],
         "@@G5_EXTRA@@": g5_extra(cfg),
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@BACKFILL_BRANCH@@": cfg["backfill_branch"],
         "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@BACKFILL_BRANCH@@": cfg["backfill_branch"],
         "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
         "string(name: 'HEALTH_PATH', defaultValue: '/'": f"string(name: 'HEALTH_PATH', defaultValue: '{cfg.get('health_path') or '/'}'",
@@ -425,9 +431,11 @@ def gen_rust(cfg, template_name="rust-microservice-Jenkinsfile") -> str:
         "defaultValue: '/health'": f"defaultValue: '{cfg.get('health_path') or '/health'}'",
         "@@G5_EXTRA@@": g5_extra(cfg),
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@BACKFILL_BRANCH@@": cfg["backfill_branch"],
         "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@BACKFILL_BRANCH@@": cfg["backfill_branch"],
         "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
     }
@@ -475,9 +483,11 @@ def gen_go_ws(cfg) -> str:
         "choices: ['dev', 'prod', 'test']": build_choices(cfg["env"], "dev prod test"),
         "@@G5_EXTRA@@": g5_extra(cfg),
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@BACKFILL_BRANCH@@": cfg["backfill_branch"],
         "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@BACKFILL_BRANCH@@": cfg["backfill_branch"],
         "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
     }
@@ -559,6 +569,7 @@ def gen_frontend_ssr_nacos(cfg) -> str:
         "{{BUILD_OUTPUT_DIR}}": cfg["build_output_dir"],
         "@@G5_EXTRA@@": g5_extra(cfg),
         "@@MERGE_BRANCH@@": cfg["merge_branch"],
+        "@@BACKFILL_BRANCH@@": cfg["backfill_branch"],
         "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
     }
@@ -607,6 +618,7 @@ def gen_quarkus(cfg) -> str:
         "{{DOCKER_CREDENTIAL_ID}}": cfg["docker_credentials_id"],
         "{{DEPLOY_SSH_CRED_ID}}": cfg["deploy_ssh_cred_id"],
         "{{GITHUB_TOKEN_CREDENTIAL_ID}}": cfg["github_token_credential_id"],
+        "@@BACKFILL_BRANCH@@": cfg["backfill_branch"],
         "@@G5_EXTRA@@": g5_extra(cfg),
     }
     content = render("quarkus-Jenkinsfile", reps)
@@ -783,6 +795,7 @@ def main() -> int:
     parser.add_argument("--e2e-cmd", help="G5 部署后可选 e2e 冒烟命令（如 'bash scripts/postdeploy-smoke.sh'）")
     parser.add_argument("--build-json", action="store_true", help="G5 校验 /build.json（buildNo/distSha256）")
     parser.add_argument("--merge-branch", help="Merge Back 目标分支（默认 master；trunk 为 main 的服务填 main）")
+    parser.add_argument("--backfill-branch", help="Merge Back 后回灌目标（默认 develop；空字符串=关闭；#576）")
     parser.add_argument("--release-branch", help="固定发布分支（留空=自动取最新 release/*）")
     parser.add_argument("--github-credential-id", help="Merge Back 远程合并用 GitHub PAT 凭据 ID")
     parser.add_argument("--maven-version", help="Maven 版本 (quarkus)")
@@ -833,6 +846,7 @@ def main() -> int:
         "ws_port": args.ws_port,
         "e2e_cmd": args.e2e_cmd, "build_json": (True if args.build_json else None),
         "merge_branch": args.merge_branch,
+        "backfill_branch": args.backfill_branch,
         "release_branch": args.release_branch, "github_credential_id": args.github_credential_id,
         "maven_version": args.maven_version, "java_version": args.java_version,
         "github_token_credential_id": args.github_token_credential_id,
@@ -850,9 +864,19 @@ def main() -> int:
         print(f"❌ 错误: 不支持的项目类型: {cfg['type']}", file=sys.stderr)
         print("   异常分类: CONFIG_MISSING（type 非法）", file=sys.stderr)
         return 1
+    # #576：回灌目标不能与 Merge Back 目标相同（否则 merge 自己是空操作，镜像守卫形同虚设）
+    if cfg.get("backfill_branch") and cfg["backfill_branch"] == cfg["merge_branch"]:
+        print("❌ 错误: backfill_branch 不能等于 merge_branch（#576）", file=sys.stderr)
+        print("   异常分类: CONFIG_INVALID（回灌目标=回合目标）", file=sys.stderr)
+        return 1
     output = cfg["output"]
     print(f"🔧 使用模板: {TYPES[cfg['type']][0]}")
     content = GENERATORS[cfg["type"]](cfg)
+    # #576：backfill_branch 为空 = 显式关闭回灌 ⇒ 移除模板中的回灌块（不留下空分支引用）
+    if not (cfg.get("backfill_branch") or "").strip():
+        content = re.sub(r"[ \t]*// #576-BACKFILL-BEGIN.*?// #576-BACKFILL-END\n", "", content, flags=re.S)
+    # 回灌块已按配置取舍，移除内部标记（不留在生成物里）
+    content = re.sub(r"[ \t]*// #576-BACKFILL-(?:BEGIN|END)\n", "", content)
     # 防呆: 残留 {{...}} 模板标记进入 Jenkinsfile 会导致 Declarative Pipeline 解析失败
     leftovers = sorted(set(re.findall(r"\{\{[^}\n]+\}\}", content)))
     if leftovers:

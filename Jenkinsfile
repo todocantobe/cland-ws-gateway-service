@@ -37,6 +37,7 @@ pipeline {
         string(name: 'GIT_CREDENTIAL_ID', defaultValue: 'jenkins_github', description: 'Git 仓库访问凭证 ID')
         string(name: 'DOCKER_CREDENTIAL_ID', defaultValue: 'docker-registry-auth', description: 'Docker 仓库认证凭证 ID')
         string(name: 'DEPLOY_SSH_CRED_ID', defaultValue: 'deploy-server-ssh-key', description: '目标服务器部署 SSH 凭证 ID')
+        string(name: 'IMAGE_DIGEST_OVERRIDE', defaultValue: '', description: '回滚用：指定 image@sha256 摘要（留空=用本次构建产物）；#540 digest 钉住')
     }
 
     environment {
@@ -125,6 +126,13 @@ pipeline {
                         sh "docker tag ${fullImageName} ${DOCKER_REGISTRY}/${latestImageName}"
                         sh "docker push ${DOCKER_REGISTRY}/${latestImageName}"
                     }
+                    // #540 制品 digest 钉住：解析推送后的不可变摘要（部署以 image@sha256 引用）
+                    env.IMAGE_DIGEST = sh(returnStdout: true, script: "docker image inspect ${fullImageName} | tr -d '[:space:]' | grep -oE '@sha256:[0-9a-f]{64}' | head -1 | cut -c2-").trim()
+                    if (!(env.IMAGE_DIGEST ==~ /sha256:[0-9a-f]{64}/)) {
+                        error "❌ 无法解析镜像 digest（得到: '${env.IMAGE_DIGEST}'）——#540 digest 钉住"
+                    }
+                    writeFile file: '.image-digest', text: env.IMAGE_DIGEST + "\n"
+                    echo "--- 镜像 digest = ${env.IMAGE_DIGEST} ---"
                 }
             }
         }
@@ -167,7 +175,10 @@ pipeline {
                     }
                     def targetIp = targetConfig.ip
                     def sshUser = targetConfig.user
-                    def latestImageName = "${DOCKER_REGISTRY}/${APP_NAME}:latest"
+                    // #540 digest 钉住（含回滚覆盖）：部署 image@sha256，弃 :latest
+                    def imageDigest = (params.IMAGE_DIGEST_OVERRIDE?.trim()) ?: (env.IMAGE_DIGEST ?: readFile('.image-digest').trim())
+                    if (!(imageDigest ==~ /sha256:[0-9a-f]{64}/)) { error "❌ digest 非法（得到: '${imageDigest}'）——#540" }
+                    def latestImageName = "${DOCKER_REGISTRY}/${APP_NAME}@${imageDigest}"
 
                     def baseDir = "/opt/${APP_NAME}"
                     def logDir = "${baseDir}/logs"
@@ -274,6 +285,21 @@ pipeline {
                         sh 'git pull origin master'
                         sh "git merge --no-ff origin/${env.BRANCH_NAME} -m 'Merge release ${env.BRANCH_NAME} to master [Jenkins Build #${env.BUILD_NUMBER}]'"
                         sh 'git push origin master'
+                        // #576: Merge Back 后强制回灌 develop（master ⊆ develop），不靠人记得
+                        def backfillExists = (sh(script: 'git ls-remote --exit-code --heads origin develop >/dev/null 2>&1', returnStatus: true) == 0)
+                        if (backfillExists) {
+                            echo "回灌 master -> develop（#576）..."
+                            sh 'git fetch origin develop master'
+                            sh 'git checkout develop'
+                            sh 'git pull --ff-only origin develop'
+                            sh "git merge --no-ff origin/master -m 'Merge master back into develop [Jenkins Build #${env.BUILD_NUMBER}] (#576)'"
+                            sh 'git push origin develop'
+                            def ancestryRc = sh(script: 'git merge-base --is-ancestor origin/master origin/develop', returnStatus: true)
+                            if (ancestryRc != 0) { error "❌ 回灌校验失败：master ⊄ develop（#576 镜像守卫）" }
+                            echo "✅ 已回灌：master ⊆ develop"
+                        } else {
+                            echo "⚠️ 远端无 develop（本仓未启用 git-flow 双向），跳过回灌（#576）"
+                        }
                     }
                 }
             }

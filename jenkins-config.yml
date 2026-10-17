@@ -26,3 +26,6 @@ nacos_password: base123
 
 # Merge Back 目标分支（本仓 trunk = master）
 merge_branch: master
+
+# Merge Back 后自动回灌目标（#576；默认 develop，空=关闭）
+backfill_branch: develop

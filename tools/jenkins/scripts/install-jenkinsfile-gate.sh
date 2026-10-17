@@ -66,13 +66,26 @@ if [[ "${1:-}" == "--check" ]]; then
         echo "   修复：bash install-jenkinsfile-gate.sh \"${TARGET}\" 生成 manifest，或设 JENKINS_SKILL_DIR=<skill目录>" >&2
         exit 1
     fi
-    if [ "$drift" -eq 0 ]; then echo "✅ 无漂移：副本与真源一致"; exit 0; fi
+    # #576：VENDORED.sha256 自校验——清单必须与仓内副本逐项一致（防"清单是旧的"）
+    if [ -f "$MANIFEST" ]; then
+        echo "── VENDORED.sha256 自校验（清单↔仓内副本）──"
+        while read -r sha path; do
+            [ -z "$sha" ] && continue
+            case "$sha" in \#*) continue;; esac
+            actual="$(sha256sum "${TARGET}/${path}" 2>/dev/null | cut -d' ' -f1)"
+            if [ -z "$actual" ]; then echo "❌ 清单项缺副本: ${path}"; drift=1
+            elif [ "$actual" != "$sha" ]; then echo "❌ 清单不符: ${path}"; drift=1; fi
+        done < "$MANIFEST"
+    else
+        echo "❌ 缺 manifest: ${MANIFEST}（无法自校验，#576）" >&2; drift=1
+    fi
+    if [ "$drift" -eq 0 ]; then echo "✅ 无漂移：副本与真源一致，manifest 自校验通过"; exit 0; fi
     echo ""
     echo "修正：bash install-jenkinsfile-gate.sh \"${TARGET}\" --force" >&2
     exit 1
 fi
 
-if [ ! -d "${TARGET}/.git" ]; then
+if [ ! -e "${TARGET}/.git" ]; then
     echo "❌ 不是 git 仓库根（缺 .git）: ${TARGET}" >&2
     exit 1
 fi

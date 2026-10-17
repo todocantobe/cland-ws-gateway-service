@@ -28,6 +28,7 @@ pipeline {
         string(name: 'DOCKER_REGISTRY', defaultValue: '192.168.1.7:5000', description: 'Docker 私有仓库上传地址 (push)')
         string(name: 'DOCKER_REGISTRY_CACHE', defaultValue: '192.168.1.7:5001', description: 'Docker 拉取地址/公共镜像缓存 (pull + 基础镜像)')
         string(name: 'DOCKER_CREDENTIALS_ID', defaultValue: 'docker-hub', description: '镜像仓库登录凭证 ID')
+        string(name: 'IMAGE_DIGEST_OVERRIDE', defaultValue: '', description: '回滚用：指定 image@sha256 摘要（留空=用本次构建产物）；#540 制品 digest 钉住')
 
         // --- outbox 投递器常驻 (#458) ---
         string(name: 'OUTBOX_DISPATCH_SCRIPT', defaultValue: '@@OUTBOX_DISPATCH_SCRIPT@@', description: 'outbox 投递器脚本 (留空=不启用; 如 scripts/identity-outbox-dispatch.mjs)')
@@ -237,6 +238,13 @@ pipeline {
                         """
                         }
                     }
+                    // #540 制品 digest 钉住：解析推送后的不可变摘要（部署以 image@sha256 引用，弃 tag）
+                    env.IMAGE_DIGEST = sh(returnStdout: true, script: "docker image inspect ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${tag} | tr -d '[:space:]' | grep -oE '@sha256:[0-9a-f]{64}' | head -1 | cut -c2-").trim()
+                    if (!(env.IMAGE_DIGEST ==~ /sha256:[0-9a-f]{64}/)) {
+                        error "❌ 无法解析镜像 digest（得到: '${env.IMAGE_DIGEST}'）——#540 digest 钉住"
+                    }
+                    writeFile file: '.image-digest', text: env.IMAGE_DIGEST + "\n"
+                    echo "--- 镜像 digest = ${env.IMAGE_DIGEST} ---"
                 }
             }
         }
@@ -277,6 +285,13 @@ pipeline {
                     }
                     // [安全] 以 --env-file 加载（不拼命令行、不 echo）：避免密钥出现在构建日志 / sh -x 跟踪
                     writeFile file: '.deploy-env', text: appEnvVars
+                    // #540 digest 钉住（含回滚覆盖）：部署一律以 image@sha256 引用
+                    def imageDigest = (params.IMAGE_DIGEST_OVERRIDE?.trim()) ?: (env.IMAGE_DIGEST ?: readFile('.image-digest').trim())
+                    if (!(imageDigest ==~ /sha256:[0-9a-f]{64}/)) {
+                        error "❌ digest 非法（得到: '${imageDigest}'）——#540"
+                    }
+                    def imageRef = "${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}@${imageDigest}"
+                    echo "--- 部署镜像（digest 钉住）: ${imageRef} ---"
 
                     withCredentials([sshUserPrivateKey(
                         credentialsId: params.DEPLOY_CREDENTIAL_ID,
@@ -300,13 +315,13 @@ pipeline {
                                 set -e
                                 cat > /tmp/${params.DOCKER_IMAGE_NAME}.env
                                 chmod 600 /tmp/${params.DOCKER_IMAGE_NAME}.env
-                                docker pull ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${env.IMAGE_TAG}
+                                docker pull ${imageRef}
                                 docker stop ${params.DOCKER_IMAGE_NAME} 2>/dev/null || true
                                 docker rm ${params.DOCKER_IMAGE_NAME} 2>/dev/null || true
                                 docker run -d --restart=always --name ${params.DOCKER_IMAGE_NAME} \\
                                     -p ${params.EXPOSE_APP_PORT}:${params.APP_PORT} \\
                                     --env-file /tmp/${params.DOCKER_IMAGE_NAME}.env \\
-                                    ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${env.IMAGE_TAG}
+                                    ${imageRef}
                                 echo '--- 容器状态 ---'
                                 docker ps --filter name=${params.DOCKER_IMAGE_NAME}
                                 # outbox 投递器常驻 (#458): 同镜像独立容器; 幂等(先停旧再起); 留空则跳过
@@ -316,7 +331,7 @@ pipeline {
                                     docker run -d --restart=always --name ${params.DOCKER_IMAGE_NAME}-outbox \
                                         --env-file /tmp/${params.DOCKER_IMAGE_NAME}.env \
                                         --entrypoint node \
-                                        ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${env.IMAGE_TAG} \
+                                        ${imageRef} \
                                         ${params.OUTBOX_DISPATCH_SCRIPT}
                                     echo '--- 投递器状态 ---'
                                     sleep 3
@@ -371,6 +386,29 @@ pipeline {
                             echo "GitHub merge HTTP \$code"; cat /tmp/mg.json 2>/dev/null; echo
                             case "\$code" in 201|204) echo "✅ GitHub 远程合并完成（base=@@MERGE_BRANCH@@ head=${env.BRANCH_NAME}）";; *) echo "❌ GitHub 远程合并失败 HTTP \$code（409=冲突，需人工处理）"; exit 1;; esac
                         """
+                        // #576-BACKFILL-BEGIN
+                        // #576: Merge Back 后强制回灌 develop（master ⊆ develop），不靠人记得
+                        sh """
+                            set -e
+                            bcode=\$(curl -s -o /dev/null -w '%{http_code}' \
+                              -H "Authorization: Bearer \$GH_TOKEN" \
+                              -H "Accept: application/vnd.github+json" \
+                              "https://api.github.com/repos/${owner}/${repo}/branches/@@BACKFILL_BRANCH@@")
+                            if [ "\$bcode" = "404" ]; then
+                                echo "⚠️ 远端无 @@BACKFILL_BRANCH@@（本仓未启用 git-flow 双向），跳过回灌（#576）"
+                            elif [ "\$bcode" != "200" ]; then
+                                echo "❌ 查询 @@BACKFILL_BRANCH@@ 失败 HTTP \$bcode"; exit 1
+                            else
+                                fcode=\$(curl -s -o /tmp/bf.json -w '%{http_code}' -X POST \
+                                  -H "Authorization: Bearer \$GH_TOKEN" \
+                                  -H "Accept: application/vnd.github+json" \
+                                  "https://api.github.com/repos/${owner}/${repo}/merges" \
+                                  -d '{"base":"@@BACKFILL_BRANCH@@","head":"@@MERGE_BRANCH@@"}')
+                                echo "GitHub 回灌 merge HTTP \$fcode"; cat /tmp/bf.json 2>/dev/null; echo
+                                case "\$fcode" in 201|204) echo "✅ 已回灌：@@MERGE_BRANCH@@ ⊆ @@BACKFILL_BRANCH@@（#576）";; *) echo "❌ 回灌失败 HTTP \$fcode（409=冲突，需人工处理）"; exit 1;; esac
+                            fi
+                        """
+                        // #576-BACKFILL-END
                     }
                 }
             }
@@ -380,7 +418,7 @@ pipeline {
 
     post {
         success {
-            echo "✅ Pipeline 成功。镜像 ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${env.IMAGE_TAG}；部署：${params.RUN_DEPLOY ? '已部署到 ' + params.DEPLOY_HOST : '已跳过'}"
+            echo "✅ Pipeline 成功。镜像 ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}@${env.IMAGE_DIGEST}（tag ${env.IMAGE_TAG}）；部署：${params.RUN_DEPLOY ? '已部署到 ' + params.DEPLOY_HOST : '已跳过'}"
         }
         failure {
             echo "❌ Pipeline 失败。请查看 Console Output"
