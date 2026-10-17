@@ -192,12 +192,10 @@ pipeline {
                         sh """
                             set -e
                             docker build --build-arg NODE_BASE_IMAGE=${params.DOCKER_REGISTRY_CACHE}/library/node:${params.NODE_VERSION}-alpine \
-                                         -t ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${tag} \
-                                         -t ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:latest .
+                                         -t ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${tag} .
                             echo "--- 推送镜像到私有仓库 ---"
                             echo "${REGISTRY_PASS}" | docker login ${params.DOCKER_REGISTRY} -u ${REGISTRY_USER} --password-stdin
                             docker push ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${tag}
-                            docker push ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:latest
                             docker logout ${params.DOCKER_REGISTRY}
                         """
                         }

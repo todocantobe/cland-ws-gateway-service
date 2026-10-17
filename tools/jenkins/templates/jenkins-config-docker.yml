@@ -11,7 +11,7 @@ type: frontend-docker
 # 输出文件路径（默认 ./Jenkinsfile）
 output: ./Jenkinsfile
 
-# 构建环境: dev | test | prod（prod 额外推送 :latest 标签）
+# 构建环境: dev | test | prod（#540：不再推送 :latest，制品以 BUILD_NUMBER-commit + digest 钉住）
 env: prod
 
 # --- 前端 (npm) ---

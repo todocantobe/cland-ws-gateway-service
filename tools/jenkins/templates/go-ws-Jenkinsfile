@@ -119,13 +119,10 @@ pipeline {
                     def gitCommit = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
                     def imageTag = "${env.BUILD_NUMBER}-${gitCommit}"
                     def fullImageName = "${DOCKER_REGISTRY}/${APP_NAME}:${imageTag}"
-                    def latestImageName = "${APP_NAME}:latest"
 
                     docker.withRegistry("http://${DOCKER_REGISTRY}", DOCKER_CREDENTIAL_ID) {
                         def app = docker.build(fullImageName, ".")
                         app.push()
-                        sh "docker tag ${fullImageName} ${DOCKER_REGISTRY}/${latestImageName}"
-                        sh "docker push ${DOCKER_REGISTRY}/${latestImageName}"
                     }
                     // #540 制品 digest 钉住：解析推送后的不可变摘要（部署以 image@sha256 引用）
                     env.IMAGE_DIGEST = sh(returnStdout: true, script: "docker image inspect ${fullImageName} | tr -d '[:space:]' | grep -oE '@sha256:[0-9a-f]{64}' | head -1 | cut -c2-").trim()

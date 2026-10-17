@@ -163,7 +163,6 @@ pipeline {
                     def gitCommit = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
                     def imageTag = "${env.BUILD_NUMBER}-${gitCommit}"
                     def fullImage = "${params.DOCKER_REGISTRY}/${params.APP_NAME}:${imageTag}"
-                    def latestImage = "${params.DOCKER_REGISTRY}/${params.APP_NAME}:latest"
                     // native 构建用 native-micro，否则用 JVM 镜像
                     def dockerfile = (env.NATIVE_BUILD == 'true') ? 'src/main/docker/Dockerfile.native-micro' : 'src/main/docker/Dockerfile.jvm'
 
@@ -171,8 +170,6 @@ pipeline {
                         // 按 native/JVM 模式选择 Dockerfile
                         def app = docker.build(fullImage, "--no-cache -f ${dockerfile} .")
                         app.push()
-                        sh "docker tag ${fullImage} ${latestImage}"
-                        sh "docker push ${latestImage}"
                     }
                     // #540 制品 digest 钉住：解析推送后的不可变摘要（部署以 image@sha256 引用）
                     env.IMAGE_DIGEST = sh(returnStdout: true, script: "docker image inspect ${fullImage} | tr -d '[:space:]' | grep -oE '@sha256:[0-9a-f]{64}' | head -1 | cut -c2-").trim()
