@@ -303,7 +303,7 @@ REMOTE
         }
         stage('Merge Back to Master') {
             when {
-                expression { return env.BRANCH_NAME =~ /release\/.*/ }
+                expression { return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ }
             }
             steps {
                 sshagent(credentials: ["${GIT_CREDENTIAL_ID}"]) {
@@ -317,6 +317,23 @@ REMOTE
                         sh 'git pull origin @@MERGE_BRANCH@@'
                         sh "git merge --no-ff origin/${env.BRANCH_NAME} -m 'Merge release ${env.BRANCH_NAME} to @@MERGE_BRANCH@@ [Jenkins Build #${env.BUILD_NUMBER}]'"
                         sh 'git push origin @@MERGE_BRANCH@@'
+                        // #576-BACKFILL-BEGIN
+                        // #576: Merge Back 后强制回灌 develop（master ⊆ develop），不靠人记得
+                        def backfillExists = (sh(script: 'git ls-remote --exit-code --heads origin @@BACKFILL_BRANCH@@ >/dev/null 2>&1', returnStatus: true) == 0)
+                        if (backfillExists) {
+                            echo "回灌 @@MERGE_BRANCH@@ -> @@BACKFILL_BRANCH@@（#576）..."
+                            sh 'git fetch origin @@BACKFILL_BRANCH@@ @@MERGE_BRANCH@@'
+                            sh 'git checkout @@BACKFILL_BRANCH@@'
+                            sh 'git pull --ff-only origin @@BACKFILL_BRANCH@@'
+                            sh "git merge --no-ff origin/@@MERGE_BRANCH@@ -m 'Merge @@MERGE_BRANCH@@ back into @@BACKFILL_BRANCH@@ [Jenkins Build #${env.BUILD_NUMBER}] (#576)'"
+                            sh 'git push origin @@BACKFILL_BRANCH@@'
+                            def ancestryRc = sh(script: 'git merge-base --is-ancestor origin/@@MERGE_BRANCH@@ origin/@@BACKFILL_BRANCH@@', returnStatus: true)
+                            if (ancestryRc != 0) { error "❌ 回灌校验失败：@@MERGE_BRANCH@@ ⊄ @@BACKFILL_BRANCH@@（#576 镜像守卫）" }
+                            echo "✅ 已回灌：@@MERGE_BRANCH@@ ⊆ @@BACKFILL_BRANCH@@"
+                        } else {
+                            echo "⚠️ 远端无 @@BACKFILL_BRANCH@@（本仓未启用 git-flow 双向），跳过回灌（#576）"
+                        }
+                        // #576-BACKFILL-END
                     }
                 }
             }

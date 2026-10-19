@@ -1,7 +1,9 @@
 # 提交门禁 (gate.yaml) — cland-ws-gateway-service (Go) · #397
 gates:
   doclint:
-    cmd: "python3 tools/doclint.py . --quiet"
+    # #615：vendored 资产（tools/jenkins/**，含 VENDORED.md）是真源副本，不适用本仓文档头规则，
+    # 且加头会破坏 vendored-sync（副本 sha256 必须等于真源）⇒ 排除。
+    cmd: "python3 tools/doclint.py . --quiet --exclude tools/jenkins"
     on:
       - "**.md"
       - "tools/**"

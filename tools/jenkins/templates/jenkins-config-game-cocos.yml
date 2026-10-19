@@ -1,0 +1,27 @@
+# ===================================================================
+# jenkins-config.yml — Cocos Creator 游戏仓（平台门禁）配置示例
+# 用法: bash scripts/generate-jenkinsfile.sh -y ./jenkins-config.yml
+# 真源: 改此文件 → 重生成 Jenkinsfile（提交门禁 check-jenkinsfile.sh 会拦手改漂移）
+# ===================================================================
+
+# 项目类型: game-cocos ↔ templates/game-cocos-Jenkinsfile
+type: game-cocos
+
+# 输出文件路径（默认 ./Jenkinsfile）
+output: ./Jenkinsfile
+
+# 构建环境: dev | test | prod（游戏仓仅记录，不参与打包）
+env: prod
+
+# --- Node (nvm) ---
+node_version: "22"                                   # Node 版本（nvm 安装/切换）
+git_credential_id: chaineasy                         # Jenkins 凭据 ID
+npm_registry: https://registry.npmmirror.com         # npm 镜像源
+node_options: "--max-old-space-size=4096"            # NODE_OPTIONS
+
+# --- 门禁命令（默认 npm test；仓库用别的单测入口时覆盖） ---
+test_command: "npm test"
+
+# --- 小程序出包冒烟（可选；需 Jenkins 节点存在 cocos-engine 源码） ---
+wechat_build: false                                  # true = 每次构建都出包+冒烟（重）；false = 只跑单测+静态门禁
+cocos_engine: /opt/cocos-engine                      # cocos-engine 源码路径（可在 Jenkins Job 参数默认值覆盖）

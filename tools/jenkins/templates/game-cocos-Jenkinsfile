@@ -1,0 +1,179 @@
+// ===================================================================
+// Jenkinsfile — Cocos Creator 游戏仓「平台门禁」（单测 + 静态门禁 + 可选小程序出包冒烟）
+// 生成: bash /home/alice/.agents/skills/jenkins/scripts/generate-jenkinsfile.sh -y ./jenkins-config.yml
+// 配置真源: 仓库 jenkins-config.yml（改配置后重生成，勿手改本文件）
+//
+// 为什么有它（base/cland-devops#1）：
+//   游戏仓此前只有本地脚本门禁（npm test / scripts/check.sh），平台无兜底 ⇒ 本地「假绿」
+//   （打印 FAILED 但 rc=0）时平台也是绿的。本流水线把判据放到平台执行：
+//   ① 退出码即判据（任一步 rc!=0 ⇒ 构建红，阻断合并/发布）
+//   ② 单测报告以 JUnit XML 归档（报告可核对，不信本地自报）
+//   ③ 静态门禁走仓库 scripts/check.sh（本地/平台同一入口）
+//   ④ 出包冒烟默认关（需 Jenkins 节点具备 cocos-engine），开启后同样以 rc 判定
+//
+// 不做部署：游戏仓的发布（微信上传/静态站）走仓库自带脚本，不属于本门禁范围。
+// ===================================================================
+pipeline {
+    agent any
+
+    // --- 参数化构建配置 ---
+    parameters {
+        choice(name: 'DEPLOY_ENV', choices: ['dev', 'prod', 'test'], description: '构建环境标识（游戏仓仅记录，不参与打包）')
+
+        string(name: 'NODE_VERSION', defaultValue: '22', description: '使用的 Node.js 版本 (nvm 安装/切换)')
+
+        string(name: 'GIT_CREDENTIAL_ID', defaultValue: 'chaineasy', description: 'Git 仓库访问凭证 ID')
+
+        booleanParam(name: 'BUILD_WECHAT', defaultValue: @@WECHAT_BUILD_DEFAULT@@,
+            description: '构建微信小游戏包并跑冒烟（需节点存在 cocos-engine；关闭时只跑单测+静态门禁）')
+
+        string(name: 'COCOS_ENGINE', defaultValue: '@@COCOS_ENGINE@@',
+            description: 'cocos-engine 源码路径（可在 Jenkins Job 参数默认值中覆盖）')
+
+        string(name: 'WECHAT_APPID', defaultValue: '', description: '微信 appid（留空用测试号；上传体验版才需要）')
+    }
+
+    environment {
+        NODE_OPTIONS = "--max-old-space-size=4096"
+        // 单测报告落盘路径（JUnit XML，平台归档后可核对）
+        VITEST_REPORT = "reports/vitest.xml"
+    }
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '5'))
+        timeout(time: 40, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    stages {
+        stage('Checkout & Init') {
+            steps {
+                checkout scm
+                script {
+                    if (env.BRANCH_NAME == null || env.BRANCH_NAME == '') {
+                        env.BRANCH_NAME = sh(returnStdout: true, script: 'git rev-parse --abbrev-ref HEAD').trim()
+                    }
+                    echo "Current Branch: ${env.BRANCH_NAME}"
+                    echo "Node: ${params.NODE_VERSION} | DEPLOY_ENV: ${params.DEPLOY_ENV} | BUILD_WECHAT: ${params.BUILD_WECHAT}"
+                    sh 'git log --oneline -1'
+                }
+            }
+        }
+
+        // ⚠ Install 必须独立成阶段且先于一切需要依赖的阶段
+        stage('Install Dependencies') {
+            steps {
+                script {
+                    sh """
+                        export NVM_DIR="\$HOME/.nvm"
+                        [ -s "\$NVM_DIR/nvm.sh" ] && . "\$NVM_DIR/nvm.sh"
+                        if ! command -v nvm &> /dev/null; then
+                            echo "❌ 错误: 未在系统中找到 nvm，请确保 Jenkins Agent 已安装 nvm。"
+                            exit 1
+                        fi
+                        nvm install ${params.NODE_VERSION}
+                        nvm use ${params.NODE_VERSION}
+                        node -v && npm -v
+                        # 有锁文件必须 npm ci（可复现）；无锁文件才退回 npm install
+                        if [ -f package-lock.json ]; then
+                            npm ci --registry=https://registry.npmmirror.com
+                        else
+                            npm install --registry=https://registry.npmmirror.com
+                        fi
+                    """
+                }
+            }
+        }
+
+        // 门禁①：单测。默认 `npm test`，可用 jenkins-config.yml 的 test_command 覆盖。
+        stage('Unit Test') {
+            steps {
+                script {
+                    sh """
+                        export NVM_DIR="\$HOME/.nvm"
+                        [ -s "\$NVM_DIR/nvm.sh" ] && . "\$NVM_DIR/nvm.sh"
+                        nvm use ${params.NODE_VERSION} >/dev/null 2>&1 || nvm install ${params.NODE_VERSION}
+                        mkdir -p reports
+                        # JUnit 报告 + 默认文本报告并行输出；任一用例失败 ⇒ 退出码非 0 ⇒ 构建红
+                        if ! npm test -- --reporter=default --reporter=junit --outputFile=${env.VITEST_REPORT}; then
+                            echo "❌ 单测未通过（退出码非 0）—— 平台判红，禁止合并/发布"
+                            exit 1
+                        fi
+                    """
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: "${env.VITEST_REPORT}", skipPublishingChecks: true
+                }
+            }
+        }
+
+        // 门禁②：仓库统一静态门禁（本地/平台同一入口）
+        stage('Static Gate (scripts/check.sh)') {
+            steps {
+                script {
+                    sh """
+                        export NVM_DIR="\$HOME/.nvm"
+                        [ -s "\$NVM_DIR/nvm.sh" ] && . "\$NVM_DIR/nvm.sh"
+                        nvm use ${params.NODE_VERSION} >/dev/null 2>&1 || nvm install ${params.NODE_VERSION}
+                        if [ ! -f scripts/check.sh ]; then
+                            echo "❌ 缺少 scripts/check.sh —— 游戏仓平台门禁要求仓库提供统一静态门禁入口"
+                            exit 1
+                        fi
+                        chmod +x scripts/check.sh
+                        if ! bash scripts/check.sh; then
+                            echo "❌ 静态门禁失败（scripts/check.sh 退出码非 0）"
+                            exit 1
+                        fi
+                    """
+                }
+            }
+        }
+
+        // 门禁③（可选）：小程序出包 + 冒烟。rc 即判据。
+        stage('WeChat Package & Smoke') {
+            when { expression { params.BUILD_WECHAT } }
+            steps {
+                script {
+                    sh """
+                        export NVM_DIR="\$HOME/.nvm"
+                        [ -s "\$NVM_DIR/nvm.sh" ] && . "\$NVM_DIR/nvm.sh"
+                        nvm use ${params.NODE_VERSION} >/dev/null 2>&1 || nvm install ${params.NODE_VERSION}
+
+                        if [ ! -d "${params.COCOS_ENGINE}" ]; then
+                            echo "❌ cocos-engine 不存在: ${params.COCOS_ENGINE}"
+                            echo "   在 Jenkins Job 参数默认值里填正确路径，或关闭 BUILD_WECHAT"
+                            exit 1
+                        fi
+                        if [ ! -f scripts/wechat/build-wechat.sh ]; then
+                            echo "❌ 缺少 scripts/wechat/build-wechat.sh"
+                            exit 1
+                        fi
+
+                        bash scripts/wechat/build-wechat.sh "${params.COCOS_ENGINE}" "${params.WECHAT_APPID}"
+
+                        # 冒烟：mock 微信运行时，断言启动链路 + 主循环 + 触摸链路无异常
+                        cd build/wechatgame
+                        node ../../scripts/wechat/smoke.js
+                    """
+                }
+            }
+            post {
+                success {
+                    archiveArtifacts artifacts: 'build/wechatgame/**', allowEmptyArchive: true, fingerprint: true
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ 平台门禁通过：单测 + 静态门禁${params.BUILD_WECHAT ? ' + 小程序出包冒烟' : ''}（branch=${env.BRANCH_NAME}）"
+        }
+        failure {
+            echo "❌ 平台门禁失败：见各阶段退出码（平台判据，非本地自报）"
+        }
+    }
+}
