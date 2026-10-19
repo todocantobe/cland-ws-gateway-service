@@ -27,6 +27,7 @@ pipeline {
         string(name: 'DOCKER_REGISTRY', defaultValue: '192.168.1.7:5000', description: 'Docker 私有仓库上传地址 (push)')
         string(name: 'DOCKER_REGISTRY_CACHE', defaultValue: '192.168.1.7:5001', description: 'Docker 拉取地址/公共镜像缓存 (pull + 基础镜像)')
         string(name: 'DOCKER_CREDENTIALS_ID', defaultValue: 'docker-hub', description: '镜像仓库登录凭证 ID')
+        string(name: 'IMAGE_DIGEST_OVERRIDE', defaultValue: '', description: '回滚用：指定 image@sha256 摘要（留空=用本次构建产物）；#540 digest 钉住')
 
         // --- SSH 部署参数 (服务器信息由 Jenkins Job 参数默认值维护) ---
         booleanParam(name: 'RUN_DEPLOY', defaultValue: true, description: '构建后部署到服务器：SSH docker run 启动容器')
@@ -191,16 +192,21 @@ pipeline {
                         sh """
                             set -e
                             docker build --build-arg NODE_BASE_IMAGE=${params.DOCKER_REGISTRY_CACHE}/library/node:${params.NODE_VERSION}-alpine \
-                                         -t ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${tag} \
-                                         -t ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:latest .
+                                         -t ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${tag} .
                             echo "--- 推送镜像到私有仓库 ---"
                             echo "${REGISTRY_PASS}" | docker login ${params.DOCKER_REGISTRY} -u ${REGISTRY_USER} --password-stdin
                             docker push ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${tag}
-                            docker push ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:latest
                             docker logout ${params.DOCKER_REGISTRY}
                         """
                         }
                     }
+                    // #540 制品 digest 钉住：解析推送后的不可变摘要（部署以 image@sha256 引用，弃 tag）
+                    env.IMAGE_DIGEST = sh(returnStdout: true, script: "docker image inspect ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${tag} | tr -d '[:space:]' | grep -oE '@sha256:[0-9a-f]{64}' | head -1 | cut -c2-").trim()
+                    if (!(env.IMAGE_DIGEST ==~ /sha256:[0-9a-f]{64}/)) {
+                        error "❌ 无法解析镜像 digest（得到: '${env.IMAGE_DIGEST}'）——#540 digest 钉住"
+                    }
+                    writeFile file: '.image-digest', text: env.IMAGE_DIGEST + "\n"
+                    echo "--- 镜像 digest = ${env.IMAGE_DIGEST} ---"
                 }
             }
         }
@@ -240,6 +246,13 @@ pipeline {
                     // [安全] 写入文件而不是拼到命令行：writeFile 不打印内容，容器用 --env-file 加载，
                     //       避免密钥出现在构建日志 / sh -x 跟踪里（曾在 echo envArgs 处泄露 AUTH_SECRET/DB_PASS）
                     writeFile file: '.deploy-env', text: appEnvVars
+                    // #540 digest 钉住（含回滚覆盖）：部署一律以 image@sha256 引用
+                    def imageDigest = (params.IMAGE_DIGEST_OVERRIDE?.trim()) ?: (env.IMAGE_DIGEST ?: readFile('.image-digest').trim())
+                    if (!(imageDigest ==~ /sha256:[0-9a-f]{64}/)) {
+                        error "❌ digest 非法（得到: '${imageDigest}'）——#540"
+                    }
+                    def imageRef = "${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}@${imageDigest}"
+                    echo "--- 部署镜像（digest 钉住）: ${imageRef} ---"
 
                     withCredentials([sshUserPrivateKey(
                         credentialsId: params.DEPLOY_CREDENTIAL_ID,
@@ -263,13 +276,13 @@ pipeline {
                                 set -e
                                 cat > /tmp/${params.DOCKER_IMAGE_NAME}.env
                                 chmod 600 /tmp/${params.DOCKER_IMAGE_NAME}.env
-                                docker pull ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${env.IMAGE_TAG}
+                                docker pull ${imageRef}
                                 docker stop ${params.DOCKER_IMAGE_NAME} 2>/dev/null || true
                                 docker rm ${params.DOCKER_IMAGE_NAME} 2>/dev/null || true
                                 docker run -d --restart=always --name ${params.DOCKER_IMAGE_NAME} \\
                                     -p ${params.EXPOSE_APP_PORT}:${params.APP_PORT} \\
                                     --env-file /tmp/${params.DOCKER_IMAGE_NAME}.env \\
-                                    ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${env.IMAGE_TAG}
+                                    ${imageRef}
                                 echo '--- 容器状态 ---'
                                 docker ps --filter name=${params.DOCKER_IMAGE_NAME}
                             " < .deploy-env
@@ -298,7 +311,7 @@ pipeline {
         }
         stage('Merge Back to Master') {
             when {
-                expression { return env.BRANCH_NAME =~ /release\/.*/ }
+                expression { return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ }
             }
             steps {
                 script {
@@ -319,6 +332,29 @@ pipeline {
                             echo "GitHub merge HTTP \$code"; cat /tmp/mg.json 2>/dev/null; echo
                             case "\$code" in 201|204) echo "✅ GitHub 远程合并完成（base=@@MERGE_BRANCH@@ head=${env.BRANCH_NAME}）";; *) echo "❌ GitHub 远程合并失败 HTTP \$code（409=冲突，需人工处理）"; exit 1;; esac
                         """
+                        // #576-BACKFILL-BEGIN
+                        // #576: Merge Back 后强制回灌 develop（master ⊆ develop），不靠人记得
+                        sh """
+                            set -e
+                            bcode=\$(curl -s -o /dev/null -w '%{http_code}' \
+                              -H "Authorization: Bearer \$GH_TOKEN" \
+                              -H "Accept: application/vnd.github+json" \
+                              "https://api.github.com/repos/${owner}/${repo}/branches/@@BACKFILL_BRANCH@@")
+                            if [ "\$bcode" = "404" ]; then
+                                echo "⚠️ 远端无 @@BACKFILL_BRANCH@@（本仓未启用 git-flow 双向），跳过回灌（#576）"
+                            elif [ "\$bcode" != "200" ]; then
+                                echo "❌ 查询 @@BACKFILL_BRANCH@@ 失败 HTTP \$bcode"; exit 1
+                            else
+                                fcode=\$(curl -s -o /tmp/bf.json -w '%{http_code}' -X POST \
+                                  -H "Authorization: Bearer \$GH_TOKEN" \
+                                  -H "Accept: application/vnd.github+json" \
+                                  "https://api.github.com/repos/${owner}/${repo}/merges" \
+                                  -d '{"base":"@@BACKFILL_BRANCH@@","head":"@@MERGE_BRANCH@@"}')
+                                echo "GitHub 回灌 merge HTTP \$fcode"; cat /tmp/bf.json 2>/dev/null; echo
+                                case "\$fcode" in 201|204) echo "✅ 已回灌：@@MERGE_BRANCH@@ ⊆ @@BACKFILL_BRANCH@@（#576）";; *) echo "❌ 回灌失败 HTTP \$fcode（409=冲突，需人工处理）"; exit 1;; esac
+                            fi
+                        """
+                        // #576-BACKFILL-END
                     }
                 }
             }
@@ -328,7 +364,7 @@ pipeline {
 
     post {
         success {
-            echo "✅ Pipeline 成功。镜像 ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:${env.IMAGE_TAG}；部署：${params.RUN_DEPLOY ? '已部署到 ' + params.DEPLOY_HOST : '已跳过'}"
+            echo "✅ Pipeline 成功。镜像 ${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}@${env.IMAGE_DIGEST}（tag ${env.IMAGE_TAG}）；部署：${params.RUN_DEPLOY ? '已部署到 ' + params.DEPLOY_HOST : '已跳过'}"
         }
         failure {
             echo "❌ Pipeline 失败。请查看 Console Output"

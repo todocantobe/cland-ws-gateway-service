@@ -102,6 +102,7 @@ pipeline {
         string(name: 'GIT_CREDENTIAL_ID',   defaultValue: '{{GIT_CREDENTIAL_ID}}')
         string(name: 'DOCKER_CREDENTIAL_ID', defaultValue: '{{DOCKER_CREDENTIAL_ID}}')
         string(name: 'DEPLOY_SSH_CRED_ID',   defaultValue: '{{DEPLOY_SSH_CRED_ID}}')
+        string(name: 'IMAGE_DIGEST_OVERRIDE', defaultValue: '', description: '回滚用：指定 image@sha256 摘要（留空=用本次构建产物）；#540 digest 钉住')
     }
 
     environment {
@@ -156,13 +157,12 @@ pipeline {
         // Stage: Build & Push Docker Image (Native mode)
         // ----------------------------------------------------
         stage('Build & Push Image') {
-            when { expression { return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /^master$|^main$/ } }
+            when { expression { return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ || env.BRANCH_NAME =~ /^master$|^main$/ } }
             steps {
                 script {
                     def gitCommit = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
                     def imageTag = "${env.BUILD_NUMBER}-${gitCommit}"
                     def fullImage = "${params.DOCKER_REGISTRY}/${params.APP_NAME}:${imageTag}"
-                    def latestImage = "${params.DOCKER_REGISTRY}/${params.APP_NAME}:latest"
                     // native 构建用 native-micro，否则用 JVM 镜像
                     def dockerfile = (env.NATIVE_BUILD == 'true') ? 'src/main/docker/Dockerfile.native-micro' : 'src/main/docker/Dockerfile.jvm'
 
@@ -170,9 +170,14 @@ pipeline {
                         // 按 native/JVM 模式选择 Dockerfile
                         def app = docker.build(fullImage, "--no-cache -f ${dockerfile} .")
                         app.push()
-                        sh "docker tag ${fullImage} ${latestImage}"
-                        sh "docker push ${latestImage}"
                     }
+                    // #540 制品 digest 钉住：解析推送后的不可变摘要（部署以 image@sha256 引用）
+                    env.IMAGE_DIGEST = sh(returnStdout: true, script: "docker image inspect ${fullImage} | tr -d '[:space:]' | grep -oE '@sha256:[0-9a-f]{64}' | head -1 | cut -c2-").trim()
+                    if (!(env.IMAGE_DIGEST ==~ /sha256:[0-9a-f]{64}/)) {
+                        error "❌ 无法解析镜像 digest（得到: '${env.IMAGE_DIGEST}'）——#540 digest 钉住"
+                    }
+                    writeFile file: '.image-digest', text: env.IMAGE_DIGEST + "\n"
+                    echo "--- 镜像 digest = ${env.IMAGE_DIGEST} ---"
                 }
             }
         }
@@ -200,18 +205,21 @@ pipeline {
         // Stage: Deploy to target server
         // ----------------------------------------------------
         stage('Deploy') {
-            when { expression { return params.RUN_DEPLOY == true && (env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /^master$|^main$/) } }
+            when { expression { return params.RUN_DEPLOY == true && (env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ || env.BRANCH_NAME =~ /^master$|^main$/) } }
             steps {
                 script {
                     def targetIp = (params.DEPLOY_ENV == 'prod') ? params.PROD_SERVER_IP : params.DEV_SERVER_IP
-                    def latestImage = "${params.DOCKER_REGISTRY}/${params.APP_NAME}:latest"
+                    // #540 digest 钉住（含回滚覆盖）：部署 image@sha256，弃 :latest
+                    def imageDigest = (params.IMAGE_DIGEST_OVERRIDE?.trim()) ?: (env.IMAGE_DIGEST ?: readFile('.image-digest').trim())
+                    if (!(imageDigest ==~ /sha256:[0-9a-f]{64}/)) { error "❌ digest 非法（得到: '${imageDigest}'）——#540" }
+                    def pinnedImage = "${params.DOCKER_REGISTRY}/${params.APP_NAME}@${imageDigest}"
                     def baseDir = "/opt/${params.APP_NAME}"
 
                     def deployScript = """
                         set -e
                         sudo mkdir -p ${baseDir}/logs ${baseDir}/data
                         sudo chmod -R 777 ${baseDir}
-                        docker pull ${latestImage}
+                        docker pull ${pinnedImage}
                         docker stop ${params.APP_NAME} || true
                         docker rm ${params.APP_NAME} || true
                         docker run -d --restart=always --name ${params.APP_NAME} \\
@@ -226,7 +234,7 @@ pipeline {
                             -e NACOS_PASSWORD="\$NACOS_CRED_PASS" \\
                             -e NACOS_ENABLED="true" \\
                             -e QUARKUS_PROFILE="${params.DEPLOY_ENV}" \\
-                            ${latestImage}
+                            ${pinnedImage}
                     """
 
                     withCredentials([usernamePassword(credentialsId: params.NACOS_CREDENTIAL_ID, usernameVariable: 'NACOS_CRED_BIND_USER', passwordVariable: 'NACOS_CRED_PASS')]) {
@@ -245,7 +253,7 @@ pipeline {
         // Stage: Post-Deploy Self-Check (G5 · #398)
         // ----------------------------------------------------
         stage('Post-Deploy Self-Check (G5 · #398)') {
-            when { expression { return params.RUN_DEPLOY == true && (env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /^master$|^main$/) } }
+            when { expression { return params.RUN_DEPLOY == true && (env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ || env.BRANCH_NAME =~ /^master$|^main$/) } }
             steps {
                 script {
                     def scTargetIp = (params.DEPLOY_ENV == 'prod') ? params.PROD_SERVER_IP : params.DEV_SERVER_IP
@@ -265,7 +273,7 @@ pipeline {
         // ----------------------------------------------------
         stage('Merge Back to Master & Tag & Cleanup') {
             when {
-                expression { return env.BRANCH_NAME =~ /release\/.*/ }
+                expression { return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ }
             }
             steps {
                 sshagent (credentials: ["${GIT_CREDENTIAL_ID}"]) {
@@ -284,6 +292,24 @@ pipeline {
                         // 2. 合并 release 到 master
                         sh "git merge --no-ff origin/${env.BRANCH_NAME} -m 'Merge release ${env.BRANCH_NAME} to master [Jenkins Build #${env.BUILD_NUMBER}]'"
                         sh 'git push origin master'
+
+                        // #576-BACKFILL-BEGIN
+                        // 2.1 #576: Merge Back 后强制回灌 develop（master ⊆ develop），不靠人记得
+                        def backfillExists = (sh(script: 'git ls-remote --exit-code --heads origin @@BACKFILL_BRANCH@@ >/dev/null 2>&1', returnStatus: true) == 0)
+                        if (backfillExists) {
+                            echo "回灌 master -> @@BACKFILL_BRANCH@@（#576）..."
+                            sh 'git fetch origin @@BACKFILL_BRANCH@@ master'
+                            sh 'git checkout @@BACKFILL_BRANCH@@'
+                            sh 'git pull --ff-only origin @@BACKFILL_BRANCH@@'
+                            sh "git merge --no-ff origin/master -m 'Merge master back into @@BACKFILL_BRANCH@@ [Jenkins Build #${env.BUILD_NUMBER}] (#576)'"
+                            sh 'git push origin @@BACKFILL_BRANCH@@'
+                            def ancestryRc = sh(script: 'git merge-base --is-ancestor origin/master origin/@@BACKFILL_BRANCH@@', returnStatus: true)
+                            if (ancestryRc != 0) { error "❌ 回灌校验失败：master ⊄ @@BACKFILL_BRANCH@@（#576 镜像守卫）" }
+                            echo "✅ 已回灌：master ⊆ @@BACKFILL_BRANCH@@"
+                        } else {
+                            echo "⚠️ 远端无 @@BACKFILL_BRANCH@@（本仓未启用 git-flow 双向），跳过回灌（#576）"
+                        }
+                        // #576-BACKFILL-END
 
                         // 3. 自动打 TAG（使用 release 分支名作为版本号）
                         def tagName = "${env.BRANCH_NAME}"

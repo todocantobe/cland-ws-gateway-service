@@ -133,12 +133,6 @@ pipeline {
                         echo "--- 登录并推送 ---"
                         docker login ${params.DOCKER_REGISTRY} -u "\${REGISTRY_USER}" -p "\${REGISTRY_PASS}"
                         docker push "\${IMAGE}"
-                        if [ "${params.DEPLOY_ENV}" = "prod" ]; then
-                            LATEST="${params.DOCKER_REGISTRY}/${params.DOCKER_IMAGE_NAME}:latest"
-                            docker tag "\${IMAGE}" "\${LATEST}"
-                            docker push "\${LATEST}"
-                            echo "📦 已推送 latest 标签: \${LATEST}"
-                        fi
                         echo "📦 镜像推送完成: \${IMAGE}"
                     """
                 }
