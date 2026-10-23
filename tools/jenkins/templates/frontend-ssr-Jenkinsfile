@@ -30,7 +30,7 @@ pipeline {
         string(name: 'IMAGE_DIGEST_OVERRIDE', defaultValue: '', description: '回滚用：指定 image@sha256 摘要（留空=用本次构建产物）；#540 digest 钉住')
 
         // --- SSH 部署参数 (服务器信息由 Jenkins Job 参数默认值维护) ---
-        booleanParam(name: 'RUN_DEPLOY', defaultValue: true, description: '构建后部署到服务器：SSH docker run 启动容器')
+        booleanParam(name: 'RUN_DEPLOY', defaultValue: false, description: '显式请求部署（默认 false：构建完不部署）—— 构建后部署到服务器：SSH docker run 启动容器')
         string(name: 'DEPLOY_HOST', defaultValue: 'server.example.com', description: '服务器主机地址（IP 或域名）——请在 Jenkins Job 参数默认值中填写')
         string(name: 'DEPLOY_PORT', defaultValue: '22', description: '服务器 SSH 端口')
         string(name: 'SSH_USER', defaultValue: 'root', description: 'SSH 登录用户（云厂商密钥对通常绑定 root）')
