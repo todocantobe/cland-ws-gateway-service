@@ -63,12 +63,10 @@ OUT_PATH="$OUTPUT"
 # #615：依赖预检 —— 「缺 pyyaml」是**环境缺失**，不是「Jenkinsfile 漂移」。
 # 两者必须分开报（否则假红永远掩盖真红，该仓等于没有漂移保护）。
 # 约定：退出码 3 = 环境缺失（见 tools/gate.py 的 ENV 分类）。
-if ! python3 -c 'import yaml' >/dev/null 2>&1; then
-    echo "❌ Jenkinsfile 门禁无法执行: 缺 Python 包 pyyaml" >&2
-    echo "   异常分类: PYYAML_MISSING（环境缺失，**不是**漂移）" >&2
-    echo "   修复: pip install pyyaml，或在 gate.yaml 给本 gate 加 deps: [pyyaml]" >&2
-    exit 3
-fi
+# #628：**不再做 pyyaml 预检**。生成器自带 mini-YAML 兜底（扁平 jenkins-config.yml 等价，
+# 嵌套/列表会明确 rc=3「需要 pyyaml」）。预检会先于兜底退出，等于把可用路径挡死——
+# 这正是三次部署被 jaķenkinsfile-drift 假红挡住的根因（构建日志：PYYAML_MISSING）。
+# 缺依赖时的诊断交给生成器（它会把缺什么、为什么说清楚）。
 
 python3 "$GEN" -y "$CFG_PATH" -o "$OUT_PATH" --check
 rc=$?

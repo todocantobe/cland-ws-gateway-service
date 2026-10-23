@@ -426,7 +426,6 @@ def gen_rust(cfg, template_name="rust-microservice-Jenkinsfile") -> str:
         "defaultValue: '192.168.1.11:8848'": f"defaultValue: '{cfg['nacos_serveraddr']}'",
         "defaultValue: 'DEFAULT_GROUP'": f"defaultValue: '{cfg['nacos_group']}'",
         "defaultValue: 'base'": f"defaultValue: '{cfg['nacos_username']}'",
-        "defaultValue: '@@NACOS_PASSWORD@@'": f"defaultValue: '{cfg['nacos_password']}'",
         "defaultValue: '@@NACOS_CREDENTIAL_ID@@'": f"defaultValue: '{cfg['nacos_credential_id']}'",
         "defaultValue: 'chaineasy'": f"defaultValue: '{cfg['git_credential_id']}'",
         "defaultValue: 'docker-registry-auth'": f"defaultValue: '{cfg['docker_credentials_id']}'",
@@ -479,7 +478,6 @@ def gen_go_ws(cfg) -> str:
         "defaultValue: '192.168.1.11:8848'": f"defaultValue: '{cfg['nacos_serveraddr']}'",
         "defaultValue: 'DEFAULT_GROUP'": f"defaultValue: '{cfg['nacos_group']}'",
         "defaultValue: 'base'": f"defaultValue: '{cfg['nacos_username']}'",
-        "defaultValue: '@@NACOS_PASSWORD@@'": f"defaultValue: '{cfg['nacos_password']}'",
         "defaultValue: '@@NACOS_CREDENTIAL_ID@@'": f"defaultValue: '{cfg['nacos_credential_id']}'",
         "defaultValue: 'chaineasy'": f"defaultValue: '{cfg['git_credential_id']}'",
         "defaultValue: 'docker-registry-auth'": f"defaultValue: '{cfg['docker_credentials_id']}'",
@@ -674,15 +672,64 @@ GENERATORS = {
 }
 
 
+def _mini_yaml(text: str) -> dict:
+    """无 pyyaml 时的**最小兜底解析器**：只支持扁平 `key: value`（含注释/引号/bool/int）。
+
+    #628 实况：CI 的 rust-builder 镜像没有 pyyaml 且装不上（无外网），
+    门禁因此在 Jenkinsfile 变更时假红、挡住部署。舰队里除个别仓外 jenkins-config.yml 都是扁平结构；
+    一旦遇到嵌套/列表（`- ` 或缩进行）→ 明确报「需要 pyyaml」，**不猜测**（宁可红，不可假绿）。
+    """
+    out = {}
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if re.match(r"^[\-]\s", line) or raw[:1] in (" ", "\t"):
+            raise ValueError(f"第 {lineno} 行是嵌套/列表结构，mini-YAML 不支持（请装 pyyaml）")
+        if ":" not in line:
+            raise ValueError(f"第 {lineno} 行不是 key: value（请装 pyyaml）")
+        k, v = line.split(":", 1)
+        k = k.strip()
+        v = v.strip()
+        # 行尾注释（不在引号内）
+        if v and v[0] not in "\"'":
+            v = re.sub(r"\s+#.*$", "", v).strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        elif v in ("", "~", "null"):
+            v = None
+        elif v in ("true", "True", "yes"):
+            v = True
+        elif v in ("false", "False", "no"):
+            v = False
+        else:
+            try:
+                v = int(v)
+            except ValueError:
+                try:
+                    v = float(v)
+                except ValueError:
+                    pass
+        if k:
+            out[k] = v
+    return out
+
+
 def load_yaml(path: str) -> dict:
     if yaml is None:
         # #615：**环境缺失 ≠ 检查失败**。退出码 3 专用于「依赖/工具缺失」，
         # 让门禁层把「缺 pyyaml」与「Jenkinsfile 真漂移」分开报（否则假红掩盖真红）。
-        print("❌ 错误: 需要 pyyaml (pip install pyyaml)", file=sys.stderr)
-        print("   异常分类: PYYAML_MISSING", file=sys.stderr)
-        print("   修复: pip install pyyaml（或用 gate.yaml 的 deps: [pyyaml] 声明，由 gate runner 自动装）",
-              file=sys.stderr)
-        sys.exit(3)
+        # 先走内置 mini-YAML（扁平配置够用，CI 镜像无 pyyaml 也能判漂移）
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = _mini_yaml(f.read())
+            print("ℹ️  未安装 pyyaml，已用内置 mini-YAML 解析（扁平配置等价）", file=sys.stderr)
+            return {k: v for k, v in data.items() if v is not None}
+        except (ValueError, OSError) as e:
+            print(f"❌ 错误: 需要 pyyaml（内置 mini-YAML 不适用: {e}）", file=sys.stderr)
+            print("   异常分类: PYYAML_MISSING", file=sys.stderr)
+            print("   修复: pip install pyyaml", file=sys.stderr)
+            sys.exit(3)
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
@@ -930,6 +977,19 @@ def main() -> int:
     if broken:
         print(f"❌ 错误: 第 {broken} 行 defaultValue 的单引号字符串跨行（Groovy 非法）", file=sys.stderr)
         print("   多行文本参数需转义为 \\n（生成器 groovy_single_quote()），否则 Jenkins 报 expecting \"'''\", found '\n'", file=sys.stderr)
+        return 1
+    # #617（fail-closed）：明文口令**构建参数**一律不许进生成物。
+    # 允许的唯一形态 = 容器 env 名（值来自 withCredentials 变量，如 NACOS_PASSWORD="$NACOS_CRED_PASS"）。
+    # 判据 = 参数声明（string/password/text）里出现 PASSWORD/PASSWD/SECRET 结尾的名字；
+    # 凭据 ID（如 NACOS_CREDENTIAL_ID / GITHUB_TOKEN_CREDENTIAL_ID）不在此列。
+    secret_params = sorted(set(re.findall(
+        r"(?:string|password|text)\(\s*name:\s*'([A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET))'", content)))
+    if secret_params:
+        print(f"❌ 错误: 生成物存在明文口令类构建参数: {', '.join(secret_params)}", file=sys.stderr)
+        print("   异常分类: SECRET_PARAM_IN_TEMPLATE", file=sys.stderr)
+        print("   应为凭据引用（NACOS_CREDENTIAL_ID + withCredentials(usernamePassword(...))）；", file=sys.stderr)
+        print("   口令只能以容器 env 形式由凭据变量注入（-e NACOS_PASSWORD=\"$NACOS_CRED_PASS\"）。见 #617。",
+              file=sys.stderr)
         return 1
     # --- 校验模式 (提交门禁): 重生成比对，不落盘 ---
     if args.check or args.diff:

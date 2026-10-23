@@ -283,7 +283,9 @@ pipeline {
 
         stage('Merge Back to Master') {
             when {
-                expression { return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ }
+                // #634: Merge Back = 「改主线」动作，必须与「本次是部署」绑定（RUN_DEPLOY=true）。
+                // 只构建取证(RUN_DEPLOY=false) ⇒ 不得合并/推送主线；判据：构建前后 origin/<主line> 不变。
+                expression { return params.RUN_DEPLOY == true && (env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/) }
             }
             steps {
                 sshagent(credentials: ["${GIT_CREDENTIAL_ID}"]) {
