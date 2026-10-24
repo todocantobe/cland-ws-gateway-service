@@ -4,6 +4,7 @@ pipeline {
     // --- 参数化构建配置 ---
     parameters {
         choice(name: 'DEPLOY_ENV', choices: ['dev', 'prod', 'test'], description: '选择打包的环境模式')
+        booleanParam(name: 'APPROVE_PROD', defaultValue: false, description: 'prod 部署必须显式勾选（#682）')
 
         // --- 版本控制 ---
         // 使用 nvm 时，这里可以直接填写版本号，如 20, 18.15.0, 或 lts/*
@@ -25,6 +26,32 @@ pipeline {
     }
 
     stages {
+        // #682 DEPLOY_ENV 校验（默认非 prod；非法值必失败；prod 需显式勾 APPROVE_PROD）
+        // 判据来源: base/cland-crawler#682。校验逻辑只有这一份，ci 测试原样抽取此块运行。
+        stage('Validate DEPLOY_ENV') {
+            steps {
+                sh '''
+                # >>> deploy-env-check（test-deploy-env.sh 抽取边界，勿删）
+                set -eu
+                v="$(printf '%s' "${DEPLOY_ENV:-}" | tr -d '[:space:]')"
+                case "$v" in
+                  '')
+                    echo "❌ DEPLOY_ENV 为空：必须显式选择（允许：staging/dev/test/prod）" >&2; exit 1 ;;
+                  staging|dev|test)
+                    echo "✅ DEPLOY_ENV=$v" ;;
+                  prod)
+                    if [ "${APPROVE_PROD:-false}" != "true" ]; then
+                      echo "❌ DEPLOY_ENV=prod 必须同时勾选 APPROVE_PROD（显式审批）" >&2; exit 1
+                    fi
+                    echo "✅ DEPLOY_ENV=prod（已审批）" ;;
+                  *)
+                    echo "❌ DEPLOY_ENV 非法：'$v'（允许：staging/dev/test/prod）" >&2; exit 1 ;;
+                esac
+                # <<< deploy-env-check
+                '''
+            }
+        }
+
         stage('Checkout & Init') {
             steps {
                 checkout scm
