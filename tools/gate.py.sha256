@@ -1,0 +1,3 @@
+# SOURCE_SHA: ce468560525b2ed9aae1aeb3dd00f5e8094c32045762a33692541534df012b68
+# 本文件是 tools/gate.py 的 sha256 声明（真源: ~/.agents/skills/commit-gate/assets/tools/gate.py）；
+# 校验: bash scripts/gate-selftest.sh --verify-source
