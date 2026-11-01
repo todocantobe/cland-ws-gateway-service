@@ -58,6 +58,9 @@ DEFAULTS = {
     "app_env_credential_id": "",
     # 质量门禁命令 (npm test / npm run typecheck 等) 与产物输出目录
     "test_command": "npm test",
+    # game-cocos（Cocos Creator 游戏仓平台门禁）
+    "wechat_build": False,
+    "cocos_engine": "/opt/cocos-engine",
     "test_stage_name": "Unit Test",
     "test_enabled": True,
     "build_output_dir": "dist",
@@ -82,6 +85,13 @@ DEFAULTS = {
     "deploy_domain": "www.example.com",
     "deploy_credential_id": "deployuser-aliyun-106.15.63.142",
     "deploy_base": "/opt/www",
+    # #923 官网按环境隔离（opt-in）：DEPLOY_ENV ⇒ 发布目标**派生**（参数不再独立可填）。
+    #   prod             ⇒ deploy_base + deploy_domain
+    #   dev|test|staging ⇒ deploy_nonprod_base + deploy_nonprod_domain（dev = test，共用一套）
+    # 不启用 ⇒ 生成物与旧版**逐字节相同**（其它 frontend-deploy 仓零影响）
+    "deploy_env_isolation": False,
+    "deploy_nonprod_base": "/opt/www-staging",
+    "deploy_nonprod_domain": "",   # 空=由 deploy_domain 推（www.a.b → staging.a.b）
     # rust
     "rust_version": "1.90.0",
     "app_name": "my-rust-service",
@@ -138,6 +148,7 @@ TYPES = {
     "rust-ws": ("rust-ws-Jenkinsfile", "Rust 微服务 + WebSocket (HTTP + WS 双端口)"),
     "go-ws": ("go-ws-Jenkinsfile", "Go 服务 + WebSocket (HTTP + WS 双端口, CGO)"),
     "quarkus": ("quarkus-Jenkinsfile", "Quarkus 微服务 (Maven + Quarkus + Nacos)"),
+    "game-cocos": ("game-cocos-Jenkinsfile", "Cocos Creator 游戏 (单测 + 静态门禁 + 可选小程序出包冒烟)"),
 }
 
 
@@ -179,6 +190,26 @@ def groovy_single_quote(value: str) -> str:
     s = s.replace("'", "\\'")        # 单引号需转义
     s = s.replace("\n", "\\n")        # 换行 → 字面量 \n（Groovy 运行时解析为换行）
     return s
+
+
+def migration_arg(cfg: dict) -> str:
+    """部署门禁的迁移前置开关（#330 B2）。
+
+    `jenkins-config.yml` 里 `require_migration: false` ⇒ 生成 `--require-migration 0`
+    （纯静态仓 = 无迁移面，prod 不应被"缺 check-migration-ready.sh"卡死）；
+    未配置/`auto` ⇒ 空串，交给 deploy-gate.sh 的自动判定（有迁移面才要求脚本）。
+    """
+    val = cfg.get("require_migration")
+    if val is None:
+        return ""
+    if isinstance(val, bool):
+        return "" if val else "--require-migration 0"
+    s = str(val).strip().lower()
+    if s in ("false", "no", "0", "off"):
+        return "--require-migration 0"
+    if s in ("true", "yes", "1", "on"):
+        return "--require-migration 1"
+    return ""
 
 
 def render(template_name: str, replacements: dict, extra: dict = None) -> str:
@@ -354,9 +385,23 @@ def gen_frontend_ssr(cfg) -> str:
     return strip_test_stage(render("frontend-ssr-Jenkinsfile", reps), cfg)
 
 
+def nonprod_domain_for(domain: str) -> str:
+    """非生产域名默认值：www.a.b → staging.a.b（#923 dev/test/staging 共用一套）。"""
+    d = (domain or "").strip()
+    if d.startswith("www."):
+        return "staging." + d[len("www."):]
+    return ("staging." + d) if d else "staging.example.com"
+
+
 def gen_frontend_deploy(cfg) -> str:
     base = cfg.get("deploy_base", "/opt/www")
-    print(f"🔧 环境: {cfg['env']}, 部署: {cfg['deploy_user']}@{cfg['deploy_host']} → {base}/releases/{cfg['deploy_domain']}/<build> + current")
+    domain = cfg.get("deploy_domain", "www.example.com")
+    # #923 opt-in：DEPLOY_ENV ⇒ 发布目标派生（不启用时生成物与旧版逐字节相同）
+    isolation = bool(cfg.get("deploy_env_isolation"))
+    np_base = (cfg.get("deploy_nonprod_base") or "/opt/www-staging").strip()
+    np_domain = (cfg.get("deploy_nonprod_domain") or "").strip() or nonprod_domain_for(domain)
+    print(f"🔧 环境: {cfg['env']}, 部署: {cfg['deploy_user']}@{cfg['deploy_host']} → {base}/releases/{domain}/<build> + current"
+          + (f"（#923 隔离：staging/dev/test ⇒ {np_base} + {np_domain}）" if isolation else ""))
     reps = {
         "defaultValue: '24'": f"defaultValue: '{cfg['node_version']}'",
         "defaultValue: 'my-spa-git'": f"defaultValue: '{cfg['git_credential_id']}'",
@@ -364,7 +409,7 @@ def gen_frontend_deploy(cfg) -> str:
         "defaultValue: '22'": f"defaultValue: '{cfg['deploy_port']}'",
         "string(name: 'DEPLOY_USER', defaultValue: 'deployuser'": f"string(name: 'DEPLOY_USER', defaultValue: '{cfg['deploy_user']}'",
         "defaultValue: '/opt/www'": f"defaultValue: '{base}'",
-        "defaultValue: 'www.example.com'": f"defaultValue: '{cfg['deploy_domain']}'",
+        "defaultValue: 'www.example.com'": f"defaultValue: '{domain}'",
         "defaultValue: 'deployuser-aliyun-106.15.63.142'": f"defaultValue: '{cfg['deploy_credential_id']}'",
         "choices: ['dev', 'prod', 'test']": build_choices(cfg["env"], "dev prod test"),
         "{{TEST_STAGE_NAME}}": cfg["test_stage_name"],
@@ -375,17 +420,88 @@ def gen_frontend_deploy(cfg) -> str:
         "@@BACKFILL_BRANCH@@": cfg["backfill_branch"],
         "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
         "@@RELEASE_BRANCH@@": cfg["release_branch"],
-        "@@MERGE_BRANCH@@": cfg["merge_branch"],
-        "@@BACKFILL_BRANCH@@": cfg["backfill_branch"],
-        "@@GITHUB_CREDENTIAL_ID@@": cfg["github_credential_id"],
-        "@@RELEASE_BRANCH@@": cfg["release_branch"],
         "string(name: 'HEALTH_PATH', defaultValue: '/'": f"string(name: 'HEALTH_PATH', defaultValue: '{cfg.get('health_path') or '/'}'",
+        # 未启用隔离 ⇒ 标记行整行删除（生成物 == 旧版）
+        "        // @@DERIVE_DEPLOY_TARGET_STAGE@@\n": "",
+        "                    // @@VERIFY_DEPLOY_TARGET_LIVE@@\n": "",
     }
+    if isolation:
+        reps["defaultValue: '/opt/www'"] = "defaultValue: ''"
+        reps["defaultValue: 'www.example.com'"] = "defaultValue: ''"
+        reps["description: '站点根（部署基路径）：版本落 <base>/releases/<domain>/<build>，current 软链原子切换'"] = (
+            "description: '留空＝按 DEPLOY_ENV 派生（#923）：prod ⇒ " + base + "，staging/dev/test ⇒ " + np_base
+            + "；手填且与派生不一致 ⇒ 直接失败'")
+        reps["description: '部署域名'"] = (
+            "description: '留空＝按 DEPLOY_ENV 派生（#923）：prod ⇒ " + domain + "，staging/dev/test ⇒ " + np_domain
+            + "；手填且与派生不一致 ⇒ 直接失败'")
+        reps["        // @@DERIVE_DEPLOY_TARGET_STAGE@@\n"] = derive_stage(base, domain, np_base, np_domain)
+        reps["--run-deploy \"${params.RUN_DEPLOY}\""] = (
+            '--run-deploy "${params.RUN_DEPLOY}"'
+            ' --deploy-target-verify'
+            ' --deploy-base "${env.DEPLOY_BASE}"'
+            ' --deploy-domain "${env.DEPLOY_DOMAIN}"'
+            ' --approve-prod "${params.APPROVE_PROD}"')
+        reps["                    // @@VERIFY_DEPLOY_TARGET_LIVE@@\n"] = verify_live_step()
+
     if cfg["npm_registry"]:
         reps["https://registry.npmmirror.com"] = cfg["npm_registry"]
     if cfg["node_options"]:
         reps['NODE_OPTIONS = "--max-old-space-size=4096"'] = f'NODE_OPTIONS = "{cfg["node_options"]}"'
-    return strip_test_stage(render("frontend-deploy-Jenkinsfile", reps), cfg)
+    content = strip_test_stage(render("frontend-deploy-Jenkinsfile", reps), cfg)
+    if isolation:
+        # 部署阶段取派生值（env.*），参数只作「声明」由派生阶段校验
+        content = content.replace("params.DEPLOY_BASE", "env.DEPLOY_BASE")
+        content = content.replace("params.DEPLOY_DOMAIN", "env.DEPLOY_DOMAIN")
+    return content
+
+
+def derive_stage(prod_base: str, prod_domain: str, np_base: str, np_domain: str) -> str:
+    """#923 目标派生阶段（仅 deploy_env_isolation 启用时注入）。
+
+    派生 = 唯一实现，部署阶段直接取 env.DEPLOY_BASE/env.DEPLOY_DOMAIN；
+    参数若手填且与派生不一致 ⇒ 立即失败（fail-closed，不静默改写）。
+    """
+    return (
+        "        // #923 目标派生（depth 3）：DEPLOY_ENV 决定发布目标，参数不再独立可填\n"
+        "        stage('Derive Deploy Target') {\n"
+        "            steps {\n"
+        "                script {\n"
+        "                    def envName = (params.DEPLOY_ENV ?: '').trim()\n"
+        f"                    def wantBase = (envName == 'prod') ? '{prod_base}' : '{np_base}'\n"
+        f"                    def wantDomain = (envName == 'prod') ? '{prod_domain}' : '{np_domain}'\n"
+        "                    def declaredBase = (params.DEPLOY_BASE ?: '').trim()\n"
+        "                    def declaredDomain = (params.DEPLOY_DOMAIN ?: '').trim()\n"
+        "                    if (declaredBase && declaredBase != wantBase) {\n"
+        "                        error \"❌ DEPLOY_BASE='${declaredBase}' 与 DEPLOY_ENV=${envName} 的派生目标 '${wantBase}' 不一致（#923：目标不允许手改；staging/dev/test 只能发测试环境）\"\n"
+        "                    }\n"
+        "                    if (declaredDomain && declaredDomain != wantDomain) {\n"
+        "                        error \"❌ DEPLOY_DOMAIN='${declaredDomain}' 与 DEPLOY_ENV=${envName} 的派生目标 '${wantDomain}' 不一致（#923）\"\n"
+        "                    }\n"
+        "                    env.DEPLOY_BASE = wantBase\n"
+        "                    env.DEPLOY_DOMAIN = wantDomain\n"
+        "                    echo \"🎯 部署目标（派生）: DEPLOY_ENV=${envName} ⇒ ${env.DEPLOY_BASE} / ${env.DEPLOY_DOMAIN}\"\n"
+        "                }\n"
+        "            }\n"
+        "        }\n"
+        "\n"
+    )
+
+
+def verify_live_step() -> str:
+    """#923 E4/E5：部署后活体校验（staging 必须 noindex、生产必须可收录）。"""
+    return (
+        "                    sh \"\"\"\n"
+        "                        if [ -f scripts/verify-deploy-target.sh ]; then\n"
+        "                            case \"${params.DEPLOY_ENV}\" in\n"
+        "                              prod) EXPECT=--expect-indexable ;;\n"
+        "                              *)    EXPECT=--expect-noindex ;;\n"
+        "                            esac\n"
+        "                            bash scripts/verify-deploy-target.sh --live \"https://${env.DEPLOY_DOMAIN}\" \\$EXPECT\n"
+        "                        else\n"
+        "                            echo \"❌ 缺 scripts/verify-deploy-target.sh（#923 E4/E5 活体校验）\"; exit 1\n"
+        "                        fi\n"
+        "                    \"\"\"\n"
+    )
 
 
 def gen_java(cfg) -> str:
@@ -422,7 +538,6 @@ def gen_rust(cfg, template_name="rust-microservice-Jenkinsfile") -> str:
         "defaultValue: '192.168.1.11:8848'": f"defaultValue: '{cfg['nacos_serveraddr']}'",
         "defaultValue: 'DEFAULT_GROUP'": f"defaultValue: '{cfg['nacos_group']}'",
         "defaultValue: 'base'": f"defaultValue: '{cfg['nacos_username']}'",
-        "defaultValue: '@@NACOS_PASSWORD@@'": f"defaultValue: '{cfg['nacos_password']}'",
         "defaultValue: '@@NACOS_CREDENTIAL_ID@@'": f"defaultValue: '{cfg['nacos_credential_id']}'",
         "defaultValue: 'chaineasy'": f"defaultValue: '{cfg['git_credential_id']}'",
         "defaultValue: 'docker-registry-auth'": f"defaultValue: '{cfg['docker_credentials_id']}'",
@@ -475,7 +590,6 @@ def gen_go_ws(cfg) -> str:
         "defaultValue: '192.168.1.11:8848'": f"defaultValue: '{cfg['nacos_serveraddr']}'",
         "defaultValue: 'DEFAULT_GROUP'": f"defaultValue: '{cfg['nacos_group']}'",
         "defaultValue: 'base'": f"defaultValue: '{cfg['nacos_username']}'",
-        "defaultValue: '@@NACOS_PASSWORD@@'": f"defaultValue: '{cfg['nacos_password']}'",
         "defaultValue: '@@NACOS_CREDENTIAL_ID@@'": f"defaultValue: '{cfg['nacos_credential_id']}'",
         "defaultValue: 'chaineasy'": f"defaultValue: '{cfg['git_credential_id']}'",
         "defaultValue: 'docker-registry-auth'": f"defaultValue: '{cfg['docker_credentials_id']}'",
@@ -626,6 +740,33 @@ def gen_quarkus(cfg) -> str:
     return content
 
 
+def gen_game_cocos(cfg) -> str:
+    """Cocos Creator 游戏仓平台门禁（base/cland-devops#1）。
+
+    与 frontend 的差异：不产 Web 静态包；门禁 = vitest 单测 + scripts/check.sh，
+    可选 BUILD_WECHAT 走 scripts/wechat/build-wechat.sh + smoke.js。
+    """
+    print(f"🔧 环境: {cfg['env']}, Node: {cfg['node_version']}, 凭证: {cfg['git_credential_id']}, "
+          f"出包冒烟默认: {cfg['wechat_build']}")
+    reps = {
+        "defaultValue: '22'": f"defaultValue: '{cfg['node_version']}'",
+        "defaultValue: 'chaineasy'": f"defaultValue: '{cfg['git_credential_id']}'",
+        "choices: ['dev', 'prod', 'test']": build_choices(cfg["env"], "dev prod test"),
+        "@@WECHAT_BUILD_DEFAULT@@": "true" if cfg["wechat_build"] else "false",
+        "@@COCOS_ENGINE@@": cfg["cocos_engine"],
+    }
+    content = render("game-cocos-Jenkinsfile", reps)
+    if cfg["npm_registry"]:
+        content = content.replace("https://registry.npmmirror.com", cfg["npm_registry"])
+    if cfg["node_options"]:
+        content = content.replace('NODE_OPTIONS = "--max-old-space-size=4096"',
+                                  f'NODE_OPTIONS = "{cfg["node_options"]}"')
+    test_cmd = (cfg.get("test_command") or "npm test").strip()
+    if test_cmd != "npm test":
+        content = content.replace("if ! npm test -- --reporter=default", f"if ! {test_cmd} --reporter=default")
+    return content
+
+
 GENERATORS = {
     "frontend": lambda cfg: gen_frontend(cfg, "Jenkinsfile"),
     "frontend-yarn": lambda cfg: gen_frontend(cfg, "frontend-yarn-Jenkinsfile"),
@@ -639,13 +780,68 @@ GENERATORS = {
     "rust-ws": gen_rust_ws,
     "go-ws": gen_go_ws,
     "quarkus": gen_quarkus,
+    "game-cocos": gen_game_cocos,
 }
+
+
+def _mini_yaml(text: str) -> dict:
+    """无 pyyaml 时的**最小兜底解析器**：只支持扁平 `key: value`（含注释/引号/bool/int）。
+
+    #628 实况：CI 的 rust-builder 镜像没有 pyyaml 且装不上（无外网），
+    门禁因此在 Jenkinsfile 变更时假红、挡住部署。舰队里除个别仓外 jenkins-config.yml 都是扁平结构；
+    一旦遇到嵌套/列表（`- ` 或缩进行）→ 明确报「需要 pyyaml」，**不猜测**（宁可红，不可假绿）。
+    """
+    out = {}
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if re.match(r"^[\-]\s", line) or raw[:1] in (" ", "\t"):
+            raise ValueError(f"第 {lineno} 行是嵌套/列表结构，mini-YAML 不支持（请装 pyyaml）")
+        if ":" not in line:
+            raise ValueError(f"第 {lineno} 行不是 key: value（请装 pyyaml）")
+        k, v = line.split(":", 1)
+        k = k.strip()
+        v = v.strip()
+        # 行尾注释（不在引号内）
+        if v and v[0] not in "\"'":
+            v = re.sub(r"\s+#.*$", "", v).strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        elif v in ("", "~", "null"):
+            v = None
+        elif v in ("true", "True", "yes"):
+            v = True
+        elif v in ("false", "False", "no"):
+            v = False
+        else:
+            try:
+                v = int(v)
+            except ValueError:
+                try:
+                    v = float(v)
+                except ValueError:
+                    pass
+        if k:
+            out[k] = v
+    return out
 
 
 def load_yaml(path: str) -> dict:
     if yaml is None:
-        print("❌ 错误: 需要 pyyaml (pip install pyyaml)", file=sys.stderr)
-        sys.exit(1)
+        # #615：**环境缺失 ≠ 检查失败**。退出码 3 专用于「依赖/工具缺失」，
+        # 让门禁层把「缺 pyyaml」与「Jenkinsfile 真漂移」分开报（否则假红掩盖真红）。
+        # 先走内置 mini-YAML（扁平配置够用，CI 镜像无 pyyaml 也能判漂移）
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = _mini_yaml(f.read())
+            print("ℹ️  未安装 pyyaml，已用内置 mini-YAML 解析（扁平配置等价）", file=sys.stderr)
+            return {k: v for k, v in data.items() if v is not None}
+        except (ValueError, OSError) as e:
+            print(f"❌ 错误: 需要 pyyaml（内置 mini-YAML 不适用: {e}）", file=sys.stderr)
+            print("   异常分类: PYYAML_MISSING", file=sys.stderr)
+            print("   修复: pip install pyyaml", file=sys.stderr)
+            sys.exit(3)
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
@@ -877,6 +1073,10 @@ def main() -> int:
         content = re.sub(r"[ \t]*// #576-BACKFILL-BEGIN.*?// #576-BACKFILL-END\n", "", content, flags=re.S)
     # 回灌块已按配置取舍，移除内部标记（不留在生成物里）
     content = re.sub(r"[ \t]*// #576-BACKFILL-(?:BEGIN|END)\n", "", content)
+    # #330 B2：迁移前置开关（jenkins-config.yml: require_migration: false ⇒ 静态仓免迁移前置）
+    content = content.replace("{{MIGRATION_ARG}}", migration_arg(cfg))
+    # 未配置时不留下双空格（`--branch "x"  --run-deploy` 虽合法，但生成物应干净可比对）
+    content = content.replace('"  --run-deploy', '" --run-deploy')
     # 防呆: 残留 {{...}} 模板标记进入 Jenkinsfile 会导致 Declarative Pipeline 解析失败
     leftovers = sorted(set(re.findall(r"\{\{[^}\n]+\}\}", content)))
     if leftovers:
@@ -893,6 +1093,19 @@ def main() -> int:
     if broken:
         print(f"❌ 错误: 第 {broken} 行 defaultValue 的单引号字符串跨行（Groovy 非法）", file=sys.stderr)
         print("   多行文本参数需转义为 \\n（生成器 groovy_single_quote()），否则 Jenkins 报 expecting \"'''\", found '\n'", file=sys.stderr)
+        return 1
+    # #617（fail-closed）：明文口令**构建参数**一律不许进生成物。
+    # 允许的唯一形态 = 容器 env 名（值来自 withCredentials 变量，如 NACOS_PASSWORD="$NACOS_CRED_PASS"）。
+    # 判据 = 参数声明（string/password/text）里出现 PASSWORD/PASSWD/SECRET 结尾的名字；
+    # 凭据 ID（如 NACOS_CREDENTIAL_ID / GITHUB_TOKEN_CREDENTIAL_ID）不在此列。
+    secret_params = sorted(set(re.findall(
+        r"(?:string|password|text)\(\s*name:\s*'([A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET))'", content)))
+    if secret_params:
+        print(f"❌ 错误: 生成物存在明文口令类构建参数: {', '.join(secret_params)}", file=sys.stderr)
+        print("   异常分类: SECRET_PARAM_IN_TEMPLATE", file=sys.stderr)
+        print("   应为凭据引用（NACOS_CREDENTIAL_ID + withCredentials(usernamePassword(...))）；", file=sys.stderr)
+        print("   口令只能以容器 env 形式由凭据变量注入（-e NACOS_PASSWORD=\"$NACOS_CRED_PASS\"）。见 #617。",
+              file=sys.stderr)
         return 1
     # --- 校验模式 (提交门禁): 重生成比对，不落盘 ---
     if args.check or args.diff:

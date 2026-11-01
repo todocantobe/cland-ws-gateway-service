@@ -29,3 +29,9 @@ deploy_user: root                                    # SSH 登录用户（云厂
 deploy_owner: deployuser                             # 站点属主（chown 目标，如 deployuser:deployuser）
 deploy_domain: www.example.com                       # 部署域名，解压目标 /var/www/<domain>/
 deploy_credential_id: deploy-key                     # SSH 私钥凭证 ID（Jenkins 凭据管理）
+
+# --- #923 官网按环境隔离（opt-in；dev = test，共用一套，不新增第三个环境）---
+# deploy_env_isolation: true                        # 开启后 DEPLOY_BASE/DEPLOY_DOMAIN 由 DEPLOY_ENV 派生
+# deploy_base: /opt/www                             # prod 站点根
+# deploy_nonprod_base: /opt/www-staging             # dev|test|staging 站点根
+# deploy_nonprod_domain: staging.example.com        # dev|test|staging 域名（默认 staging.<deploy_domain 去 www.>）

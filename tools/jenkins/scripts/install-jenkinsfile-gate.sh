@@ -15,6 +15,31 @@
 set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# ── vendored 文件清单（**单一来源** #678）──────────────────────────────────
+# 复制(--install)、校验(--check)、清单(gen_manifest)、只读出口(--print-vendor-files)
+# 全部遍历这一个数组；禁止再出现第二份硬编码列表（P-022 一个概念一处实现）。
+# 生成物（VENDORED.md / VENDORED.sha256）**有意不在清单内**（自哈希矛盾）。
+VENDOR_FILES=(
+  "tools/jenkins/scripts/generate-jenkinsfile.py"
+  "tools/jenkins/scripts/install-jenkinsfile-gate.sh"
+  "scripts/check-jenkinsfile.sh"
+  "scripts/deploy-gate.sh"
+  "scripts/selfcheck.sh"
+  "scripts/test-branch-gate.sh"
+  "scripts/fetch-nacos-env.mjs"
+)
+vendor_src() { # vendor_src <仓库内相对路径> [真源根，默认 SKILL_DIR]
+    local rel="$1" base="${2:-$SKILL_DIR}"
+    rel="${rel#tools/jenkins/}"
+    printf '%s\n' "${base}/${rel}"
+}
+
+# --print-vendor-files：**只读出口**（不改工作树/不复制/不写清单），供巡检器与自检取集合
+if [[ "${1:-}" == "--print-vendor-files" ]]; then
+    for rel in "${VENDOR_FILES[@]}"; do printf '%s\n' "$rel"; done
+    exit 0
+fi
 TARGET="${1:-$(pwd)}"
 FORCE=0
 [[ "${2:-}" == "--force" ]] && FORCE=1
@@ -36,12 +61,9 @@ if [[ "${1:-}" == "--check" ]]; then
     fi
     if [ -n "$TRUTH" ] && [ -d "$TRUTH" ]; then
         echo "── Jenkinsfile 门禁「真源↔副本」漂移检查（真源=$TRUTH）──"
-        cmp_one "${TRUTH}/scripts/generate-jenkinsfile.py" "${VENDOR}/scripts/generate-jenkinsfile.py"
-        cmp_one "${TRUTH}/scripts/check-jenkinsfile.sh"     "${TARGET}/scripts/check-jenkinsfile.sh"
-        cmp_one "${TRUTH}/scripts/deploy-gate.sh"           "${TARGET}/scripts/deploy-gate.sh"
-        cmp_one "${TRUTH}/scripts/selfcheck.sh"             "${TARGET}/scripts/selfcheck.sh"
-        cmp_one "${TRUTH}/scripts/test-branch-gate.sh"      "${TARGET}/scripts/test-branch-gate.sh"
-        cmp_one "${TRUTH}/scripts/fetch-nacos-env.mjs"      "${TARGET}/scripts/fetch-nacos-env.mjs"
+        for rel in "${VENDOR_FILES[@]}"; do
+            cmp_one "$(vendor_src "$rel" "$TRUTH")" "${TARGET}/${rel}"
+        done
         for t in "${TRUTH}"/templates/*; do
             cmp_one "$t" "${VENDOR}/templates/$(basename "$t")"
         done
@@ -102,20 +124,16 @@ install_file() { # install_file <src> <dst>
 }
 
 VENDOR="${TARGET}/tools/jenkins"
-install_file "${SKILL_DIR}/scripts/generate-jenkinsfile.py" "${VENDOR}/scripts/generate-jenkinsfile.py"
-install_file "${SKILL_DIR}/scripts/install-jenkinsfile-gate.sh" "${VENDOR}/scripts/install-jenkinsfile-gate.sh"
+for rel in "${VENDOR_FILES[@]}"; do
+    install_file "$(vendor_src "$rel")" "${TARGET}/${rel}"
+done
 
 # 模板整体固化（生成器按 ../templates 定位）
 mkdir -p "${VENDOR}/templates"
 cp -f "${SKILL_DIR}"/templates/* "${VENDOR}/templates/" 2>/dev/null || true
 echo "synced : ${VENDOR}/templates/ ($(ls "${VENDOR}/templates" | wc -l) files)"
 
-install_file "${SKILL_DIR}/scripts/check-jenkinsfile.sh" "${TARGET}/scripts/check-jenkinsfile.sh"
-install_file "${SKILL_DIR}/scripts/deploy-gate.sh" "${TARGET}/scripts/deploy-gate.sh"
-install_file "${SKILL_DIR}/scripts/selfcheck.sh" "${TARGET}/scripts/selfcheck.sh"
-install_file "${SKILL_DIR}/scripts/test-branch-gate.sh" "${TARGET}/scripts/test-branch-gate.sh"
-# frontend-ssr-nacos: 构建期从 Nacos 拉取环境变量（取不到即 fail-closed）
-install_file "${SKILL_DIR}/scripts/fetch-nacos-env.mjs" "${TARGET}/scripts/fetch-nacos-env.mjs"
+
 chmod +x "${TARGET}/scripts/check-jenkinsfile.sh" "${TARGET}/scripts/deploy-gate.sh" "${TARGET}/scripts/selfcheck.sh" "${TARGET}/scripts/test-branch-gate.sh" "${TARGET}/scripts/fetch-nacos-env.mjs"
 
 # 记录固化来源，便于审计版本
@@ -132,10 +150,7 @@ HUB_COMMIT="$(git -C "${SKILL_DIR}" rev-parse HEAD 2>/dev/null || true)"
 # 生成 sha256 清单（CI 离线判漂移用；与真源同源写入）
 gen_manifest() {
     local rel
-    for rel in "tools/jenkins/scripts/generate-jenkinsfile.py" \
-               "scripts/check-jenkinsfile.sh" "scripts/deploy-gate.sh" \
-               "scripts/selfcheck.sh" "scripts/test-branch-gate.sh" \
-               "scripts/fetch-nacos-env.mjs"; do
+    for rel in "${VENDOR_FILES[@]}"; do
         [ -f "${TARGET}/${rel}" ] && sha256sum "${TARGET}/${rel}" | sed "s#  ${TARGET}/#  #"
     done
     local t

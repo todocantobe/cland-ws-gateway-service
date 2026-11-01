@@ -4,6 +4,7 @@ pipeline {
     // --- 参数化构建配置 (占位值由 generate-jenkinsfile.py 替换) ---
     parameters {
         choice(name: 'DEPLOY_ENV', choices: ['dev', 'prod', 'test'], description: '选择要部署的目标环境')
+        booleanParam(name: 'APPROVE_PROD', defaultValue: false, description: 'prod 部署必须显式勾选（#682）')
         booleanParam(name: 'RUN_DEPLOY', defaultValue: false, description: '显式请求部署（默认 false：仅构建产镜像，不部署）')
 
         // --- 服务器配置 (生产建议在 Jenkins Job 参数默认值中维护) ---
@@ -44,6 +45,32 @@ pipeline {
     }
 
     stages {
+        // #682 DEPLOY_ENV 校验（默认非 prod；非法值必失败；prod 需显式勾 APPROVE_PROD）
+        // 判据来源: base/cland-crawler#682。校验逻辑只有这一份，ci 测试原样抽取此块运行。
+        stage('Validate DEPLOY_ENV') {
+            steps {
+                sh '''
+                # >>> deploy-env-check（test-deploy-env.sh 抽取边界，勿删）
+                set -eu
+                v="$(printf '%s' "${DEPLOY_ENV:-}" | tr -d '[:space:]')"
+                case "$v" in
+                  '')
+                    echo "❌ DEPLOY_ENV 为空：必须显式选择（允许：staging/dev/test/prod）" >&2; exit 1 ;;
+                  staging|dev|test)
+                    echo "✅ DEPLOY_ENV=$v" ;;
+                  prod)
+                    if [ "${APPROVE_PROD:-false}" != "true" ]; then
+                      echo "❌ DEPLOY_ENV=prod 必须同时勾选 APPROVE_PROD（显式审批）" >&2; exit 1
+                    fi
+                    echo "✅ DEPLOY_ENV=prod（已审批）" ;;
+                  *)
+                    echo "❌ DEPLOY_ENV 非法：'$v'（允许：staging/dev/test/prod）" >&2; exit 1 ;;
+                esac
+                # <<< deploy-env-check
+                '''
+            }
+        }
+
         stage('Checkout & Init') {
             steps {
                 checkout scm
@@ -170,10 +197,30 @@ pipeline {
             }
             steps {
                 script {
+                    // #330 B1：单分支 pipeline（BranchSpec: :origin/master）下 env.BRANCH_NAME 为空，
+                    // 而 `git rev-parse --abbrev-ref HEAD` 在 detached 检出返回字面量 "HEAD"
+                    // ⇒ 旧逻辑把它当分支名 ⇒ G1 判「不可部署分支：HEAD」⇒ 单分支 job 的 prod 部署必死。
+                    // 这里显式解析真实分支名并回写 env.BRANCH_NAME（后续 Merge Back 等阶段同样受益）。
+                    def dgBranch = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').replaceFirst('^origin/', '')
+                    def dgSrc = dgBranch ? 'env' : ''
+                    if (dgBranch == '' || dgBranch == 'HEAD') {
+                        dgBranch = sh(returnStdout: true, script: 'git rev-parse --abbrev-ref HEAD 2>/dev/null || true').trim()
+                        dgSrc = 'git-symbolic'
+                    }
+                    if (dgBranch == '' || dgBranch == 'HEAD') {
+                        dgBranch = sh(returnStdout: true, script: "git for-each-ref --points-at HEAD --format='%(refname:short)' refs/heads refs/remotes/origin 2>/dev/null | sed 's#^origin/##' | grep -vx HEAD | head -1").trim()
+                        dgSrc = 'git-refs'
+                    }
+                    if (dgBranch == '' || dgBranch == 'HEAD') {
+                        echo "❌ 无法解析分支名（来源=${dgSrc}）：detached 检出且无 ref 指向 HEAD。单分支 job 请在 BranchSpec 写默认分支名，或显式传 BRANCH_NAME"
+                    } else {
+                        echo "BRANCH_NAME=${dgBranch}（来源=${dgSrc}）"
+                        env.BRANCH_NAME = dgBranch
+                    }
                     sh '''
                         if [ -f scripts/deploy-gate.sh ]; then
                             echo "--- 部署门禁 G0-G3 (env=${DEPLOY_ENV}, branch=${BRANCH_NAME}) ---"
-                            bash scripts/deploy-gate.sh --env "${DEPLOY_ENV}" --branch "${BRANCH_NAME}" --run-deploy "${RUN_DEPLOY}"
+                            bash scripts/deploy-gate.sh --env "${DEPLOY_ENV}" --branch "${BRANCH_NAME}" {{MIGRATION_ARG}} --run-deploy "${RUN_DEPLOY}"
                         else
                             echo "❌ 缺部署门禁脚本 scripts/deploy-gate.sh（#398，install-jenkinsfile-gate.sh 安装）"; exit 1
                         fi
@@ -235,7 +282,7 @@ pipeline {
                             -e NACOS_DATAID="${params.NACOS_DATAID}" \\
                             -e NACOS_GROUP="${params.NACOS_GROUP}" \\
                             -e NACOS_USERNAME="${params.NACOS_USERNAME}" \\
-                            -e NACOS_PASSWORD="\$NACOS_CRED_PASS" \\
+                            -e NACOS_PASSWORD \\
                             ${pinnedImageName}
 
                         docker ps -f name=${APP_NAME}
@@ -243,16 +290,24 @@ pipeline {
 
                     withCredentials([usernamePassword(credentialsId: params.NACOS_CREDENTIAL_ID, usernameVariable: 'NACOS_CRED_BIND_USER', passwordVariable: 'NACOS_CRED_PASS')]) {
                     withCredentials([usernamePassword(credentialsId: env.DOCKER_CREDENTIAL_ID, usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
-                        def loginCmd = "docker login ${DOCKER_REGISTRY} -u \$DOCKER_USER -p \$DOCKER_PASS"
+                        // #877：口令**一律不进 argv**（argv 对 `ps`/审计日志/异常栈全可见）
+                        //   ① docker login 用 `--password-stdin`（口令走 stdin，argv 只留用户名）
+                        //   ② NACOS_PASSWORD 走「stdin 首行」：远端 `read` 后 export，`docker run -e NACOS_PASSWORD` 从环境继承
+                        //   ③ 脚本先 writeFile 落盘，远端 `bash -s` 读剩余 stdin —— **不能**用 `printf PASS | ssh … <<EOS`（两者抢 stdin）
+                        writeFile file: '.deploy-remote.sh', text: remoteScript
                         if (targetIp == '127.0.0.1' || targetIp == 'localhost') {
-                            sh "export DOCKER_USER='\$DOCKER_USER' DOCKER_PASS='\$DOCKER_PASS'; ${loginCmd} && ${remoteScript}"
+                            sh """
+                                set -e
+                                printf '%s' "\$DOCKER_PASS" | docker login ${DOCKER_REGISTRY} -u "\$DOCKER_USER" --password-stdin
+                                export NACOS_PASSWORD="\$NACOS_CRED_PASS"
+                                bash .deploy-remote.sh
+                            """
                         } else {
                             withCredentials([sshUserPrivateKey(credentialsId: env.DEPLOY_SSH_CRED_ID, keyFileVariable: 'SSH_KEY_FILE')]) {
                                 sh """
-                                    ssh -o StrictHostKeyChecking=no -i \$SSH_KEY_FILE ${sshUser}@${targetIp} "
-                                        export DOCKER_USER='\$DOCKER_USER' DOCKER_PASS='\$DOCKER_PASS';
-                                        ${loginCmd} && ${remoteScript}
-                                    "
+                                    set -e
+                                    printf '%s' "\$DOCKER_PASS" | ssh -o StrictHostKeyChecking=no -i \$SSH_KEY_FILE ${sshUser}@${targetIp} "docker login ${DOCKER_REGISTRY} -u \$DOCKER_USER --password-stdin"
+                                    { printf '%s\\n' "\$NACOS_CRED_PASS"; cat .deploy-remote.sh; } | ssh -o StrictHostKeyChecking=no -i \$SSH_KEY_FILE ${sshUser}@${targetIp} 'IFS= read -r NACOS_PASSWORD; export NACOS_PASSWORD; bash -s'
                                 """
                             }
                         }
@@ -284,7 +339,9 @@ pipeline {
 
         stage('Merge Back to Master') {
             when {
-                expression { return env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/ }
+                // #634: Merge Back = 「改主线」动作，必须与「本次是部署」绑定（RUN_DEPLOY=true）。
+                // 只构建取证(RUN_DEPLOY=false) ⇒ 不得合并/推送主线；判据：构建前后 origin/<主line> 不变。
+                expression { return params.RUN_DEPLOY == true && (env.BRANCH_NAME =~ /release\/.*/ || env.BRANCH_NAME =~ /hotfix\/.*/) }
             }
             steps {
                 sshagent(credentials: ["${GIT_CREDENTIAL_ID}"]) {

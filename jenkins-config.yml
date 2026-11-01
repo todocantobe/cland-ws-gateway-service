@@ -22,7 +22,9 @@ nacos_namespace: ec1145fa-c136-470b-b94b-4fa365312a3d
 nacos_dataid: cland-ws-gateway-service
 nacos_group: DEFAULT_GROUP
 nacos_username: base
-nacos_password: base123
+# #617：明文口令不再支持（生成器已删除 @@NACOS_PASSWORD@@ 路径 + 内嵌 fail-closed 断言）。
+# 口令走 Jenkins 凭据引用：
+nacos_credential_id: nacos-base-creds
 
 # Merge Back 目标分支（本仓 trunk = master）
 merge_branch: master
